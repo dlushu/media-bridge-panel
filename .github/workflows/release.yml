@@ -74,6 +74,35 @@ jobs:
           sha256sum "$archive" > "${archive}.sha256"
           cat "${archive}.sha256"
 
+      # 发布说明 = CHANGELOG 里这一节的内容。
+      # 别只写"见 CHANGELOG.md"：Release 页面是外部第一眼看到的东西，一句"见文件"等于没写
+      # （实测被人指出过"怎么不写改了什么"）。摘不到就中止，免得发出一个没有说明的版本。
+      - name: 摘出发布说明（CHANGELOG 对应版本那一节）
+        run: |
+          set -euo pipefail
+          awk -v v="$VERSION" '
+            index($0, "## [" v "]") == 1 { inside = 1; next }
+            inside && index($0, "## [") == 1 { exit }
+            inside { print }
+          ' CHANGELOG.md \
+            | sed '/./,$!d' \
+            | sed -e "s#](docs/#](https://github.com/${GITHUB_REPOSITORY}/blob/main/docs/#g" \
+                  -e "s#](CHANGELOG.md)#](https://github.com/${GITHUB_REPOSITORY}/blob/main/CHANGELOG.md)#g" \
+            > notes.md
+          if [ ! -s notes.md ]; then
+            echo "CHANGELOG.md 里没有 ${VERSION} 这一节（标题应为 ## [${VERSION}]），发布中止"
+            exit 1
+          fi
+          {
+            echo "发布说明摘自 [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/CHANGELOG.md) 的 ${VERSION} 一节。"
+            echo
+            cat notes.md
+            echo
+            echo "---"
+            echo "面板「设置 → 版本与更新」里可以手动更新到这个版本；它只安装正式 Release 的资产并校验 sha256。"
+          } > notes.full.md
+          cat notes.full.md
+
       # 标签重推或重跑时同名 Release 可能已存在，此时覆盖同名资产而不是失败。
       - name: 创建 Release 并上传资产
         env:
@@ -84,8 +113,10 @@ jobs:
           checksum="media-bridge-panel-${VERSION}.tar.gz.sha256"
           if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "$archive" "$checksum" --clobber
+            # 重跑时说明也一起刷新，免得留下上一版的旧说明
+            gh release edit "$GITHUB_REF_NAME" --title "$VERSION" --notes-file notes.full.md
           else
             gh release create "$GITHUB_REF_NAME" "$archive" "$checksum" \
               --title "$VERSION" \
-              --notes "发布说明见 CHANGELOG.md 的 ${VERSION} 一节。"
+              --notes-file notes.full.md
           fi
