@@ -36,6 +36,8 @@
 | GET | `/api/panel/backup` | 导出配置（`settings/*.json` + 源清单；**不含**带 cookie/token 的 `runtime/`） |
 | POST | `/api/panel/restore` | 恢复配置（只写模块设置，不改动本机源清单） |
 | POST | `/api/panel/tmdb/test` | 测试 TMDB 设置（面板「TMDB 设置 → 测试」）。原先位于 `/api/emby/tmdb/test`，已随配置迁到面板层 |
+| GET | `/api/panel/update` | 版本与更新状态：`{managed, current, latest, hasUpdate, repo, source, appRoot, runningDir, installed[], previous, error}`。查最新 Release 有 60 秒缓存，失败把原因写进 `error` 而不抛 |
+| POST | `/api/panel/update` | 安装某个版本并请求重启：`{version?}`（省略则装最新）。装完写 `<DATA_DIR>/app/.restart` 并向自身发 `SIGTERM` 走正常关闭流程，由容器引导脚本拉起新版本。`managed:false`（非引导脚本托管）时返回 400 |
 
 ### 数据源层（source）
 
@@ -178,6 +180,10 @@ emby 层直接 `require` 该模块而**不经过 HTTP**（原因见 [ARCHITECTUR
 
 ```
 data/
+  app/<版本>/              **应用代码**（容器启动时从 GitHub Release 取得；面板可手动更新，见 [ADR-0019](adr/0019-self-update-from-release.md)）
+    server.js  server/  public/  package.json  README.md
+  app/current.json         当前运行版本（`{version, installedAt, source}`）
+  app/.restart             更新时的重启标记：引导脚本读到即拉起新版本（正常运行时不存在）
   settings/<模块>.json     模块设置（见上文）
   settings.json.migrated   旧版单文件设置（升级留档，可删）
   sources.json             本地托管源清单
@@ -194,6 +200,7 @@ data/
     <插件id>/storage.json   插件私有存储 Catpaw.storage（文件权限 600）
 ```
 
+- `data/app/` 不进入配置备份（可以从 Release 重新取得）；其余部分（设置、源清单、账号）才是备份对象。
 - `data/` 已在 `.gitignore` 里（**含凭证**，不要提交）。
 - 想完全清空：停掉面板后 `rm -rf data`。
 - 想只清某个源的运行数据：删除 `data/sources/<源id>/runtime/`。

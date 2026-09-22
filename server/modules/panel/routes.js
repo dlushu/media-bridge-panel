@@ -20,6 +20,7 @@ const auth = require('../../core/auth');
 const { sendJson, sendError, readBody } = require('../../core/http');
 const { DATA_DIR, SETTINGS_DIR } = require('../../core/paths');
 const backup = require('./backup');
+const update = require('./update');
 const pkg = require('../../../package.json');
 
 /**
@@ -275,6 +276,38 @@ module.exports = function routes(r) {
     cachedb.clearAll();
     console.log('  ✔ 缓存已清空（tmdb.db 的元数据+名字索引、cache.db 的图片索引；账号不受影响）');
     return sendJson(res, 200, cacheView());
+  });
+
+  /* ---- 版本与更新（见 docs/adr/0019-self-update-from-release.md）----
+   * GET  查版本（带 60 秒缓存；失败把原因放在 error 里，不抛）
+   * POST 安装某个版本并请求监督者重启（`{"version":"1.1.0"}`，省略则装最新）
+   * 只有受引导脚本托管时才允许安装：否则换掉代码也没人把新版本拉起来。
+   */
+  r.add('GET', '/api/panel/update', async (req, res, { query }) =>
+    sendJson(res, 200, await update.status({ force: query.get('force') === '1' }))
+  );
+
+  r.add('POST', '/api/panel/update', async (req, res) => {
+    if (!update.isManaged()) {
+      return sendError(
+        res,
+        400,
+        '当前不是由容器引导脚本托管的运行方式，面板无法自更新（直接跑源码时请自行更新并重启）'
+      );
+    }
+    const body = await readBody(req);
+    let version = String((body && body.version) || '').trim().replace(/^v/, '');
+    try {
+      if (!version) version = await update.resolveLatest({ force: true });
+      const r0 = await update.install(version);
+      update.requestRestart(version);
+      console.log(`  ↻ 面板更新：已安装 ${r0.version}，即将重启到该版本`);
+      return sendJson(res, 200, { ok: true, installed: r0.version, downloaded: r0.downloaded, restarting: true });
+    } catch (e) {
+      const msg = (e && e.message) || String(e);
+      console.log(`  ✘ 面板更新失败：${msg}`);
+      return sendError(res, 400, msg);
+    }
   });
 
   /* ---------------- 面板日志（内存环形缓冲，见 core/logbus.js）----------------

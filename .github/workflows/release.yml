@@ -1,0 +1,84 @@
+# 发布：推送 v<版本> 标签时，产出面板可下载、校验、安装的 Release 资产。
+#
+# 资产契约见 docs/adr/0019-self-update-from-release.md：
+#   media-bridge-panel-<版本>.tar.gz   解包后顶层即 server.js / server/ / public/ / package.json / README.md
+#   media-bridge-panel-<版本>.sha256   sha256sum 的标准输出格式
+# 面板把压缩包解到 <DATA_DIR>/app/<版本>/，因此包内不套外层目录。
+# 只收运行所需文件，不含 docs/、.github/、tools/、node_modules/。
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # tag 与 package.json 版本脱节会让 Release 资产与面板记录的版本对不上，故在打包前中止。
+      - name: 校验 tag 与 package.json 版本一致
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          pkg_version="$(node -p "require('./package.json').version")"
+          echo "tag 版本：${tag_version}"
+          echo "package.json 版本：${pkg_version}"
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "版本不一致，发布中止：tag=${tag_version} package.json=${pkg_version}"
+            exit 1
+          fi
+          echo "VERSION=${tag_version}" >> "$GITHUB_ENV"
+
+      # 逐个命名路径而不是打包整个工作目录，包内路径即仓库内路径，不带 ./ 前缀。
+      - name: 打包运行时文件
+        run: |
+          set -euo pipefail
+          tar czf "media-bridge-panel-${VERSION}.tar.gz" \
+            server.js server public package.json README.md
+
+      # 缺文件要到安装时才暴露，故这里断言必需文件已进包。
+      - name: 自检压缩包内容
+        run: |
+          set -euo pipefail
+          archive="media-bridge-panel-${VERSION}.tar.gz"
+          listing="$(tar tzf "$archive")"
+          echo "$listing"
+          for required in server.js server/core/paths.js public/index.html package.json; do
+            if ! printf '%s\n' "$listing" | grep -qx "$required"; then
+              echo "压缩包缺少必需文件：${required}"
+              exit 1
+            fi
+          done
+
+      # sha256sum 的默认输出即 <64 位小写十六进制><两个空格><文件名>。
+      - name: 生成校验文件
+        run: |
+          set -euo pipefail
+          sha256sum "media-bridge-panel-${VERSION}.tar.gz" > "media-bridge-panel-${VERSION}.sha256"
+          cat "media-bridge-panel-${VERSION}.sha256"
+
+      # 标签重推或重跑时同名 Release 可能已存在，此时覆盖同名资产而不是失败。
+      - name: 创建 Release 并上传资产
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          archive="media-bridge-panel-${VERSION}.tar.gz"
+          checksum="media-bridge-panel-${VERSION}.sha256"
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$archive" "$checksum" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$archive" "$checksum" \
+              --title "$VERSION" \
+              --notes "发布说明见 CHANGELOG.md 的 ${VERSION} 一节。"
+          fi

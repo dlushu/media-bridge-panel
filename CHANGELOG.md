@@ -5,6 +5,26 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-22
+
+### 变更
+
+- **镜像不再包含应用代码**。应用代码安装在数据卷的 `<DATA_DIR>/app/<版本>/` 下：容器首次启动时
+  自动取得（`APP_VERSION` 可指定版本，否则取最新 Release），之后在「面板设置 → 设置 → 版本与更新」
+  里**手动**更新。更新完成后由容器的引导脚本把新版本拉起，**不需要重建容器、也不需要重新拉镜像**。
+  决策与理由见 [ADR-0019](docs/adr/0019-self-update-from-release.md)。
+- 发布方式：推送 `v<版本>` 标签后，由 GitHub Actions 打包出
+  `media-bridge-panel-<版本>.tar.gz` 与 `.sha256` 并附到 Release；面板**只安装正式 Release 的资产**，
+  且**必须**通过 sha256 校验。
+- 镜像 tag 因此改标识"运行时契约"（`dlushu/media-bridge-panel:runtime-1`），与应用的版本号解耦：
+  当前运行的是哪一版，看面板界面、`/api/meta` 或 `/api/panel/update`。
+
+### 说明
+
+- 首次启动需要能访问 Release 地址。网络受限时用 `APP_SOURCE_URL` 指向镜像地址或本地包
+  （支持 `http(s)://` 与容器内可见的本地路径）。
+- `<DATA_DIR>/app` 不进入配置备份（它可以从 Release 重新取得）。
+
 ## [1.0.0] - 2026-09-22
 
 首次公开发布。

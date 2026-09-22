@@ -34,7 +34,7 @@
 docker run -d --name media-bridge-panel --init --restart unless-stopped \
   -p 8099:8099 -p 9988-9998:9988-9998 \
   -v media_bridge-data:/data \
-  dlushu/media-bridge-panel:1.0.0
+  dlushu/media-bridge-panel:runtime-1
 ```
 
 等价的 compose 文件：
@@ -42,7 +42,7 @@ docker run -d --name media-bridge-panel --init --restart unless-stopped \
 ```yaml
 services:
   media-bridge-panel:
-    image: dlushu/media-bridge-panel:1.0.0
+    image: dlushu/media-bridge-panel:runtime-1
     container_name: media-bridge-panel
     restart: unless-stopped
     init: true
@@ -53,6 +53,7 @@ services:
       - media_bridge-data:/data
     environment:
       TZ: Asia/Shanghai
+      APP_REPO: dlushu/media-bridge-panel
 
 volumes:
   media_bridge-data:
@@ -61,8 +62,12 @@ volumes:
 
 启动后打开 `http://<主机地址>:8099`。
 
-> 运行数据只存在于具名卷 `media_bridge-data`（源、站点勾选、Emby 账号、面板密码、配置都在其中）。
-> 备份该卷即可完整迁移。不要执行 `docker compose down -v`：`-v` 会一并删除数据卷。
+> **镜像里没有应用代码**：容器首次启动时会从 GitHub Release 取一份装到数据卷的 `/data/app/<版本>/`
+> 下再运行（需要能访问 Release 地址；网络受限见下面的 `APP_SOURCE_URL`）。
+> 之后**升级不需要重建容器**：在「面板设置 → 设置 → 版本与更新」里手动更新，应用进程会自己重启到新版本。
+
+> 运行数据与已安装的应用代码都在具名卷 `media_bridge-data` 里（源、站点勾选、Emby 账号、面板密码、
+> 配置、应用代码）。备份该卷即可完整迁移。不要执行 `docker compose down -v`：`-v` 会一并删除数据卷。
 
 ### 方式二：运行源码
 
@@ -79,8 +84,22 @@ npm start
 |---|---|---|
 | `WEB_PORT` | `8099` | 面板端口，也是 Emby 客户端要连接的端口 |
 | `WEB_HOST` | `0.0.0.0` | 监听地址 |
-| `DATA_DIR` | 项目内 `data/`（镜像内为 `/data`） | 运行数据目录 |
+| `DATA_DIR` | 项目内 `data/`（镜像内为 `/data`） | 运行数据目录；应用代码装在它下面的 `app/` |
 | `TZ` | 跟随系统 | 日志时间（建议 `Asia/Shanghai`） |
+| `APP_REPO` | `dlushu/media-bridge-panel` | 从哪个仓库取应用代码（换成分支/私有镜像源时用） |
+| `APP_VERSION` | 未设置 | 固定运行的版本；留空 = 用已装版本，磁盘上没有则取最新 Release |
+| `APP_SOURCE_URL` | 未设置 | 版本包地址模板，占位符 `{repo}` `{version}` `{tag}` `{name}`；支持 `http(s)://` 与本地路径 |
+| `APP_CHECKSUM_URL` | 未设置 | `.sha256` 校验文件地址模板（占位符同上）；留空 = 在版本包地址后加 `.sha256` |
+
+例：网络访问不了 GitHub 时，把版本包放到自己的机器上再指过去（`.sha256` 仍需同目录提供）：
+
+```bash
+docker run -d --name media-bridge-panel --init --restart unless-stopped \
+  -p 8099:8099 -p 9988-9998:9988-9998 \
+  -v media_bridge-data:/data \
+  -e APP_SOURCE_URL=https://example.com/pkgs/media-bridge-panel-{version}.tar.gz \
+  dlushu/media-bridge-panel:runtime-1
+```
 
 ## 第一次使用
 
@@ -157,10 +176,13 @@ Emby
 
 **数据位置、备份与升级**
 
-- Docker 部署：数据在具名卷 `media_bridge-data` 内（`docker volume inspect media_bridge-data` 可查看实际路径）。
-- 备份：面板「面板设置 → 设置 → 导出备份」，或直接备份上述卷。
-- 升级：`docker pull dlushu/media-bridge-panel:<新版本>` 后重建容器（`docker compose up -d`）。
-  数据卷不受影响，配置保留。
+- Docker 部署：数据与应用代码都在具名卷 `media_bridge-data` 内
+  （`docker volume inspect media_bridge-data` 可查看实际路径），其中应用代码在 `<卷>/app/<版本>/`。
+- 备份：面板「面板设置 → 设置 → 导出备份」（只含设置与源清单），或直接备份上述卷。
+- **升级**：「面板设置 → 设置 → 版本与更新」→ 检查更新 → 更新到新版本。
+  面板会下载、校验并安装新版本，随后**自己重启**（容器不停，几秒后页面恢复）；
+  要回到旧版本时把 `APP_VERSION` 指向已安装的旧版本再重启容器即可。
+- 镜像只在"引导逻辑"变化时才需要更新：`docker pull dlushu/media-bridge-panel:runtime-1` 后重建容器。
 
 **改名**
 
@@ -178,8 +200,9 @@ Emby
 
 提交前请运行 `npm run check`（语法检查与文风检查）。
 
-> 本仓库只包含应用源码。容器定义与镜像构建脚本不属于项目源码，由维护者另行维护；
-> 分发方式为 Docker Hub 上的官方镜像（见上文）。
+> 仓库只包含应用源码；容器定义与镜像构建脚本不属于项目源码，由维护者另行维护。
+> 分发有两条路：Docker Hub 上的运行时镜像（见上文），以及 GitHub Release 上的版本包
+> —— 容器启动与面板更新装的都是后者，由 `.github/workflows/release.yml` 在推送 `v<版本>` 标签时产出。
 
 ## 许可
 

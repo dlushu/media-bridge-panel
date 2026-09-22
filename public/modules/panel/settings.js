@@ -2,6 +2,8 @@
 /**
  * 面板模块 · 「设置」页：面板自己的设置（跟「概览」分开 —— 概览只看环境，这里动设置）。
  *
+ *   · 版本与更新     面板自身按 Release 更新，安装后重启应用进程生效（GET|POST /api/panel/update，
+ *                    恢复判据是 /api/meta 的 version 变化；见 docs/adr/0019）
  *   · 配置备份与还原 导出直接下载 .json；还原选一个 .json 文件（GET /api/panel/backup · POST /api/panel/restore）
  *   · TMDB 设置      **共享配置**：emby 层（元数据反查）与聚合层（同名失败时按名字反查）都用它
  *                    存 `panel.json` 的 `tmdb.*`，自检端点 `/api/panel/tmdb/test`（见 core/tmdb.js）
@@ -15,6 +17,165 @@ import { S } from '../../core/state.js';
 import { authStatus, changePassword, logout } from '../../core/auth.js';
 import { loadAll } from '../../core/boot.js';
 import { renderPage } from '../../core/shell.js';
+
+/* -------------------------------------------------------------- 版本与更新 */
+
+/** 重启后的轮询节奏：间隔与总时限。重启时段内请求会被拒绝，属预期，不按错误处理。 */
+const UPDATE_POLL_MS = 2000;
+const UPDATE_POLL_LIMIT_MS = 60000;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * 等面板重启完成：轮询 `/api/meta`，直到版本号与重启前不同。
+ *
+ * 返回新版本号；超过时限仍未取到则返回 null。请求失败一律继续等 —— 应用进程重启的那几秒
+ * 连接会被拒绝，只有"能取到响应且版本已变"才算真的起来了。`/api/meta` 的 `version` 取自
+ * 运行中的 `package.json`，因此它同时是"新版本是否真的在跑"的判据，而不是只看进程存活。
+ */
+async function waitRestart(prevVersion) {
+  const deadline = Date.now() + UPDATE_POLL_LIMIT_MS;
+  while (Date.now() < deadline) {
+    await sleep(UPDATE_POLL_MS);
+    let meta = null;
+    try {
+      meta = await api('/api/meta');
+    } catch {
+      continue; // 面板还没起来
+    }
+    const v = meta && meta.version;
+    if (v && v !== prevVersion) return v;
+  }
+  return null;
+}
+
+/**
+ * 版本与更新卡。面板自身按 Release 安装新版本、重启应用进程生效（见 docs/adr/0019）。
+ *
+ * 数据来自 `GET /api/panel/update`，安装走 `POST /api/panel/update`。非受管运行方式
+ * （直接跑源码、或进程不是由容器的监督者拉起）如实拒绝自更新：那种情况下没有可写回的
+ * 安装目录，也没有重启后拉起新版本的监督者。
+ *
+ * 打开页面即查一次（摘要要如实显示"最新版本"只能来自这次请求），之后由「检查更新」手动触发。
+ */
+function updateCard() {
+  /* 三行摘要先占「未知」：请求整体失败时仍有可读的摘要，不留空白 */
+  const cur = el('span', { class: 'v', text: '未知' });
+  const latest = el('span', { class: 'v', text: '未知' });
+  const mode = el('span', { class: 'v', text: '未知' });
+  const check = el('button', { class: 'btn', text: '检查更新' });
+  const install = el('button', { class: 'btn primary hidden' });
+  const result = el('div', { class: 'hint' });
+  const versions = el('div', { class: 'note' });
+  let last = null; // 最近一次 GET /api/panel/update 的结果
+
+  const showResult = (cls, lines) => {
+    result.className = cls;
+    result.replaceChildren(...lines.map((t) => el('div', { text: t })));
+  };
+
+  const paint = (r) => {
+    last = r;
+    cur.textContent = r.current || '未知';
+    latest.textContent = r.latest || '未知';
+    mode.textContent = r.managed ? '受管（由容器引导）' : '非受管';
+    const inst = Array.isArray(r.installed) ? r.installed : [];
+    versions.textContent =
+      (inst.length ? `已安装：${inst.join(' / ')}` : '已安装：未知') + (r.previous ? ` · 上一版：${r.previous}` : '');
+
+    const hasNew = !!(r.hasUpdate && r.latest);
+    install.classList.toggle('hidden', !hasNew);
+    install.disabled = !r.managed; // 非受管时不给按，避免按下去才报错
+    if (hasNew) install.textContent = `更新到 ${r.latest}`;
+
+    const lines = [];
+    let cls = 'hint';
+    if (!r.managed) {
+      cls = 'hint warn';
+      lines.push('当前不是由容器引导的运行方式，面板不能自更新。');
+    } else if (hasNew) {
+      lines.push(`有新版本 ${r.latest}（当前 ${r.current}）。`);
+    } else if (!r.error) {
+      lines.push(`已是最新（${r.current || '未知'}）。`);
+    }
+    if (r.error) {
+      /* 排障信息原样带出，不吞 */
+      cls = 'hint warn';
+      lines.push('检查更新失败：' + r.error);
+    }
+    showResult(cls, lines);
+  };
+
+  const load = async (loud) => {
+    check.disabled = true;
+    check.innerHTML = '<span class="spinner"></span> 检查中…';
+    try {
+      paint(await api('/api/panel/update'));
+    } catch (e) {
+      showResult('hint warn', ['检查更新失败：' + e.message]);
+      if (loud) toast('检查更新失败：' + e.message, true);
+    } finally {
+      check.disabled = false;
+      check.textContent = '检查更新';
+    }
+  };
+
+  check.addEventListener('click', () => load(true));
+
+  install.addEventListener('click', async () => {
+    const target = (last && last.latest) || '';
+    if (!target) return;
+    if (
+      !confirm(
+        `更新到 ${target}？\n\n面板会下载并安装这个版本，然后重启应用进程（容器不停）。\n重启期间页面会短暂打不开，通常几秒内恢复。`
+      )
+    ) {
+      return;
+    }
+    const prev = (last && last.current) || '';
+    check.disabled = true;
+    install.disabled = true;
+    showResult('hint', [`正在安装 ${target}…`]);
+    try {
+      const r = await api('/api/panel/update', { method: 'POST', body: { version: target } });
+      const ver = r.installed || target;
+      toast(`已安装 ${ver}，面板正在重启`);
+      showResult('hint', [`已安装 ${ver}，面板正在重启，页面会在几秒后自动恢复。`]);
+      const now = await waitRestart(prev);
+      if (now) {
+        toast(`已更新到 ${now}`);
+        showResult('hint', [`已更新到 ${now}，正在刷新页面…`]);
+        setTimeout(() => location.reload(), 1500); // 留出看提示的时间，再取新版本的前端资源
+        return;
+      }
+      showResult('hint warn', ['面板未在 60 秒内恢复，请查看容器日志。']);
+      toast('面板未在 60 秒内恢复，请查看容器日志', true);
+    } catch (e) {
+      showResult('hint warn', ['更新失败：' + e.message]);
+      toast('更新失败：' + e.message, true);
+    }
+    check.disabled = false;
+    install.disabled = false;
+  });
+
+  const card = el(
+    'div',
+    { class: 'card' },
+    el('h3', { text: '版本与更新' }),
+    el('p', {
+      class: 'note',
+      text: '面板可以从 Release 安装新版本，安装后应用进程会重启（容器不停）。更新只由你手动触发，不会在后台自动进行。',
+    }),
+    el('div', { class: 'kv' }, el('span', { class: 'k', text: '当前版本' }), cur),
+    el('div', { class: 'kv' }, el('span', { class: 'k', text: '最新版本' }), latest),
+    el('div', { class: 'kv' }, el('span', { class: 'k', text: '运行方式' }), mode),
+    el('div', { class: 'row' }, check, install),
+    result,
+    versions
+  );
+  load(false);
+  return card;
+}
 
 /* -------------------------------------------------------------- 备份与还原 */
 
@@ -463,9 +624,9 @@ function passwordCard() {
 }
 
 export function renderPanelSettings(v) {
-  const first = backupCard();
-  v.append(first, passwordCard());
-  /* TMDB 卡与缓存卡都要异步读一次设置，各自往 v 末尾插，不挡上面两张卡。
+  const first = updateCard();
+  v.append(first, backupCard(), passwordCard());
+  /* TMDB 卡与缓存卡都要异步读一次设置，各自往 v 末尾插，不挡上面的卡。
    * ⚠️ 两张卡共用一个 `S.panel.settings`：`cacheSection` 在 `tmdbSection` 之后跑，
    * 那时设置已经读回来了（若没读到它会自己再读一次），不会出现"缓存卡拿着空设置"的情况。 */
   tmdbSection(v);
