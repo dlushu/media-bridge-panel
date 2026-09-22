@@ -16,13 +16,23 @@ const crypto = require('crypto');
 
 const { EMBY_DIR, EMBY_DB } = require('../../core/paths');
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 /* scrypt 参数：N=16384 单次约几十毫秒，登录是低频动作，够用。
  * maxmem 必须显式给（默认 32MiB），否则调大 N 会直接抛 memory limit exceeded。 */
 const SCRYPT = { N: 16384, r: 8, p: 1, keylen: 32, maxmem: 64 * 1024 * 1024 };
 
 let db = null;
+
+/**
+ * 表里有没有这一列（`pragma_table_info` 查一眼）—— **加列迁移的幂等判据**。
+ * 见 `open()` 里 3 → 4 那次：`CREATE TABLE IF NOT EXISTS` 对**已存在的表**不会补列。
+ */
+function hasColumn(table, column) {
+  return (
+    db.prepare('SELECT COUNT(*) AS n FROM pragma_table_info(?) WHERE name = ?').get(String(table), String(column)).n > 0
+  );
+}
 
 /** 打开（首次会建库建表并 chmod）；老 Node 上给一句人话报错 */
 function open() {
@@ -87,10 +97,19 @@ function open() {
       season         INTEGER,
       episode        INTEGER,
       updated_at     TEXT    NOT NULL,
+      hidden         INTEGER NOT NULL DEFAULT 0,   -- 「从继续观看里移除」（客户端 HideFromResume）；重新开始播放时清掉
       PRIMARY KEY (account_id, item_id)
     );
     CREATE INDEX IF NOT EXISTS idx_playback_recent ON playback(account_id, played, updated_at DESC);
   `);
+
+  /* 3 → 4：`playback` 加 `hidden`（客户端 `POST …/HideFromResume`）。
+   * ⚠️ 老库的表**已经建过**，上面那句 `CREATE TABLE IF NOT EXISTS` 不会补列 —— 必须显式 ALTER。
+   * 幂等：列已在就跳过（每次开库都会走到这里，重复 ALTER 会直接报错）。 */
+  if (!hasColumn('playback', 'hidden')) {
+    db.exec('ALTER TABLE playback ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;');
+  }
+
   db.prepare('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)').run('schema_version', String(SCHEMA_VERSION));
 
   /* 进程退出时收尾；server.js 的 shutdown 只停源，没有库钩子 */
@@ -354,11 +373,53 @@ function upsertPlayback(accountId, itemId, p = {}) {
   return getPlayback(accountId, itemId);
 }
 
-/** 「继续观看」：有位置、还没看完，最近看的在前 */
+/**
+ * 「继续观看」：有位置、还没看完、**没被隐藏**，最近看的在前。
+ *
+ * `hidden = 0` 来自客户端 `HideFromResume?Hide=true`（见 `setHidden`）—— 只影响这一条查询：
+ * 「已看」（`listPlayed`）与「接下来看」（`listRecentBySeries`）不因隐藏而改变。
+ */
 function listResume(accountId, limit = 20) {
   return ensure()
-    .prepare('SELECT * FROM playback WHERE account_id = ? AND played = 0 AND position_ticks > 0 ORDER BY updated_at DESC LIMIT ?')
+    .prepare(
+      'SELECT * FROM playback WHERE account_id = ? AND played = 0 AND position_ticks > 0 AND hidden = 0 ORDER BY updated_at DESC LIMIT ?'
+    )
     .all(Number(accountId), Math.max(1, Number(limit) || 20));
+}
+
+/**
+ * 隐藏 / 恢复「继续观看」里的一条（客户端 `POST …/HideFromResume?Hide=true|false`）。
+ *
+ * 三种情况：
+ *   · 库里**已有**这一行 → 只翻 `hidden` 列；
+ *   · 库里**没有**这一行、且这次是**隐藏** → 插一行**占位**（位置 0、未看、`hidden=1`，坐标用传进来的）。
+ *     为什么要占位：客户端"移除"的常常是「接着看」里那条**还没看过**的下一集（库里本来没有它的行），
+ *     不记下来的话下次拉列表它又回来了（实测 SenPlayer：移除了却还在）。
+ *     另一头由「重新开始播放自动取消隐藏」保着 —— 占位不会把以后真看时的显示挡住。
+ *   · 没有行、且这次是**恢复** → 无事可做（本来就不在列表里）。
+ *
+ * 返回改到 / 插入的行数，调用方按 0 行记一句日志。
+ */
+function setHidden(accountId, itemId, hide, coords = {}) {
+  const acc = Number(accountId);
+  const id = String(itemId);
+  const changed = ensure()
+    .prepare('UPDATE playback SET hidden = ? WHERE account_id = ? AND item_id = ?')
+    .run(hide ? 1 : 0, acc, id).changes;
+  if (changed || !hide) return changed;
+  return ensure()
+    .prepare(
+      `INSERT INTO playback (account_id, item_id, position_ticks, runtime_ticks, played, play_count, series_id, season, episode, updated_at, hidden)
+       VALUES (?,?,0,0,0,0,?,?,?,?,1)`
+    )
+    .run(
+      acc,
+      id,
+      coords.seriesId || null,
+      Number.isFinite(coords.season) ? coords.season : null,
+      Number.isFinite(coords.episode) ? coords.episode : null,
+      new Date().toISOString()
+    ).changes;
 }
 
 /** 「已看」（`Filters=IsPlayed`）：看完的，最近看的在前 */
@@ -368,10 +429,15 @@ function listPlayed(accountId, limit = 50) {
     .all(Number(accountId), Math.max(1, Number(limit) || 50));
 }
 
-/** 每部剧**最近**看的那一条（`Shows/NextUp` 用）：同 `series_id` 只留最新一条，按时间倒序 */
+/**
+ * 每部剧**最近**看的那一条（`Shows/NextUp` 用）：同 `series_id` 只留最新一条，按时间倒序。
+ *
+ * **排除被隐藏的行**：一是隐藏的占位行（位置 0、没看过）不该成为"最近观看"；
+ * 二是"把正在追的那一集移出「继续观看」"就该让这部剧让位（真机实测：隐藏后那条从 `Resume` 消失）。
+ */
 function listRecentBySeries(accountId) {
   const rows = ensure()
-    .prepare('SELECT * FROM playback WHERE account_id = ? AND series_id IS NOT NULL ORDER BY updated_at DESC')
+    .prepare('SELECT * FROM playback WHERE account_id = ? AND series_id IS NOT NULL AND hidden = 0 ORDER BY updated_at DESC')
     .all(Number(accountId));
   const seen = new Set();
   const out = [];
@@ -424,6 +490,7 @@ module.exports = {
   countSessions,
   getPlayback,
   upsertPlayback,
+  setHidden,
   listResume,
   listPlayed,
   listRecentBySeries,

@@ -18,6 +18,16 @@
   决策见 [ADR-0023](docs/adr/0023-playback-progress.md)，真机实测与取舍见
   [docs/playback-progress.md](docs/playback-progress.md)。
 
+- **客户端能改观看状态了：`HideFromResume` 与 `PlayedItems`**（此前都落 501）。
+  「从继续观看里移除 / 恢复」来自 Rex，`POST|DELETE PlayedItems`（标记已看 / 标记未看）来自 SenPlayer：
+  三条都收下（`playback` 新增 `hidden` 列，`SCHEMA_VERSION` 3 → 4），一律校验账号、回 `UserItemDataDto`
+  —— 响应与语义都按真机实测对齐（Emby 4.9.5.0 上量过：隐藏不动 `UserData`、「标记已看」不动 `PlayCount`）。
+  观看状态因此第一次变成**可写**的 —— 移除**不会抹掉进度**（位置还在，`Hide=false` 就回来），
+  重新开始播放会自动取消隐藏；标记已看会让它从「继续观看」进「已看」，标记未看则两处都消失。
+  「接着看」里那条**还没看过**的下一集也能被移除（库里有没有它的行都记得住），移除后「接下来看」让位给下一集；
+  「继续观看 / 接下来看」的日志顺带带上列出的条目 Id（以前只报条数，分不清列的是哪一条）。
+  见 [ADR-0023](docs/adr/0023-playback-progress.md) 的补充一段。
+
 ### 变更
 
 - **「聚合详情」缓存的字节上限改成可调**（「面板设置 → 缓存设置」→「聚合详情上限 MB」，默认 32MB，填 `0` = 不限）。
@@ -33,6 +43,9 @@
 
 ### 修复
 
+- **大写 `Videos` 的拉流路径也认了**：路由是区分大小写的，而 Emby 官方路径是**大写** `Videos` ——
+  实测 Lumenic/1.0.0 打的就是大写，先白吃一个 501（播放多一次无谓重试）才退回小写拿到 302。
+  现在两种大小写走**同一条实现**。
 - **条目上看不到进度条**：观看进度原先只给了 `UserData.PlaybackPositionTicks`，而客户端画进度条要的是
   `UserData.PlayedPercentage` 与**条目级 `RunTimeTicks`** —— 对比真机发现真机两条都给、本层一条都没有
   （电影条目本来就不带时长）。现在有位置的条目会带上 `PlayedPercentage`（小数百分比，位置为 0 时不给，

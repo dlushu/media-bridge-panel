@@ -298,6 +298,28 @@ CREATE INDEX IF NOT EXISTS idx_playback_recent ON playback(account_id, played, u
 - 这台真机的 `Resume` 两条都带 `PlaybackPositionTicks: 0` ⇒ 它的语义比"位置 > 0"更宽（含"该接着看的下一集"）。
   本面板的 `Resume` 按方案走"位置 > 0 且未看完"，**不照抄这个宽度**。
 
+### 写端点（`2026-09-23`，Emby 4.9.5.0；同样探测前后已还原）
+
+| 探测 | 结果 |
+|---|---|
+| `POST …/Items/{id}/HideFromResume?Hide=true` | **200** + `UserItemDataDto`；**`UserData` 一个字段都没动**；`Resume` 3 → 2 条 |
+| `POST …/HideFromResume?Hide=false` | **200** + 同样的 DTO；`Resume` 回到 3 条 |
+| `POST …/PlayedItems/{id}` | **200** + `UserItemDataDto`（`Played:true`、**`PlayCount` 原样**）；`Resume` 3 → 2、`IsPlayed` 5 → 6 |
+| `DELETE …/PlayedItems/{id}` | **200** + `UserItemDataDto`（`Played:false`、`PlayCount:0`、**`LastPlayedDate` 消失**）；`Resume` 回 3、`IsPlayed` 回 5 |
+
+三条结论直接改进了实现：**隐藏不动进度**、**隐藏就是"把这条从接着看里拿掉"**（本层因此把隐藏也记进库，
+并让 `Shows/NextUp` 跳过被隐藏的集）、**「标记已看」把 `PlayCount` 抬到至少 1**（本层先写成"不动"、
+再改成"加一"，最终按实测定为 `max(1, 已有值)`）。
+
+另补一条实测：**真机的 `Shows/NextUp` 始终是空的**（标记已看 / 真实播放进度 / 正规集号三种条件都试过）——
+它把"接着看的下一集"放在 `Resume` 里（位置 0）。所以"隐藏是否影响 `NextUp`"**在真机上问不出来**，
+本层按"隐藏 = 从接着看里拿掉"自行定口径，并在 ADR-0023 写明。
+
+整轮探测没留残迹：用过的那两集在收尾后 `UserData` 逐字段与探测前一致。
+
+一处**探不掉的残留**：真机 `DELETE` 把 `PlayCount` 归 0，而探测前那条是 `PlayCount:1 / Played:false` ——
+API 没有"设置播放次数"的端点，补不回去。
+
 ### 深一层探测（同一台真机）
 
 用一部电影（`RunTimeTicks = 76711040000`，约 127.9 分钟）走完整链路：

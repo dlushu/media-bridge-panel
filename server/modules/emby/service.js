@@ -330,6 +330,18 @@ function limitOf(query, def) {
 }
 
 /**
+ * 日志里"这次列出的是哪几条"（最多 5 个 Id，多了只报总数）。
+ *
+ * 为什么值得占这点位置：「列表对不对」是排查的第一问，而原来只报 `Items=1` ——
+ * 客户端"移除之后还在"那次就卡在这里：分不清它列的是被移除的那一集还是下一集。
+ */
+function briefIds(items, max = 5) {
+  const ids = (items || []).map((i) => i && i.Id).filter(Boolean);
+  if (!ids.length) return '';
+  return `（${ids.slice(0, max).join(', ')}${ids.length > max ? ` …共 ${ids.length} 条` : ''}）`;
+}
+
+/**
  * 库里这条的记录 → `{ userData, runtimeTicks }`；**没有记录返回 null**（调用方保持空形状）。
  *
  * `PlayedPercentage` 与 `LastPlayedDate` 是**实测对真机补齐**的两个字段：
@@ -412,11 +424,11 @@ function recordPlayback(req, kind, body) {
   const sess = sessionOf(req);
   if (!sess) return { status: 401, body: { error: '需要有效的 AccessToken' }, log: 'token 校验不过' };
 
-  const p = tmdb.parseItemId(String((body && body.ItemId) || '').trim());
-  if (!p || !isPlayableId(p)) {
+  const t = playableOf(body && body.ItemId);
+  if (!t) {
     return { status: 204, body: null, log: `上报的 ItemId 认不出（不是本面板发出去的电影/集 Id）→ 不写库：${(body && body.ItemId) || '(空)'}` };
   }
-  const itemId = tmdb.itemId(p.type, p.tmdbId, p.season, p.episode);
+  const itemId = t.itemId;
   const prev = db.getPlayback(sess.account_id, itemId) || {};
   const position = Math.max(0, Number((body && body.PositionTicks) || 0) || 0);
   const runtime = Math.max(0, Number((body && body.RunTimeTicks) || 0) || Number(prev.runtime_ticks) || 0);
@@ -425,6 +437,12 @@ function recordPlayback(req, kind, body) {
   let playCount = Number(prev.play_count) || 0;
   let storePos = position;
   let note = '';
+  /* 又开始播了 → 从「继续观看」的隐藏状态里放出来（用户又在看它了，它该回到那一行）。
+   * 只在这条被隐藏过时才写，免得每次开始播放都多一次 UPDATE。 */
+  if (kind === 'start' && Number(prev.hidden)) {
+    db.setHidden(sess.account_id, itemId, false);
+    note = '重新开始播放 → 取消「已从继续观看移除」';
+  }
   if (kind === 'stop') {
     const ratio = runtime > 0 ? position / runtime : 0;
     if (body && body.Played === true) {
@@ -451,9 +469,9 @@ function recordPlayback(req, kind, body) {
     runtimeTicks: runtime,
     played,
     playCount,
-    seriesId: p.season !== null ? tmdb.itemId('tv', p.tmdbId) : null,
-    season: p.season,
-    episode: p.episode,
+    seriesId: t.seriesId,
+    season: t.season,
+    episode: t.episode,
   });
   return {
     status: 204,
@@ -462,6 +480,114 @@ function recordPlayback(req, kind, body) {
       `${label} ${itemId} 位置 ${ticksText(storePos)}` +
       (runtime ? ` / ${ticksText(runtime)}` : ' / 时长未知') +
       (note ? ` · ${note}` : ''),
+  };
+}
+
+/**
+ * 请求里的条目 Id → 「库里那一行的主键 + 集的坐标」；**认不出返回 null**。
+ *
+ * 三条上报 + 三个写端点共用：认不出的 Id 一律**不写库**，与上报端点同口径 ——
+ * 客户端只是想让状态变一下，回 4xx/501 只会让它弹一个错误框。
+ */
+function playableOf(rawItemId) {
+  const p = tmdb.parseItemId(String(rawItemId || '').trim());
+  if (!p || !isPlayableId(p)) return null;
+  return {
+    itemId: tmdb.itemId(p.type, p.tmdbId, p.season, p.episode),
+    seriesId: p.season !== null ? tmdb.itemId('tv', p.tmdbId) : null,
+    season: p.season,
+    episode: p.episode,
+  };
+}
+
+/** 一个条目的 `UserData` 形状（库里没记录就是空形状）—— 三个写端点的响应体用它 */
+function userDataOf(accountId, itemId) {
+  const prog = progressOf(accountId, itemId);
+  return prog ? prog.userData : emptyUserData();
+}
+
+/**
+ * `POST /Users/{UserId}/Items/{ItemId}/HideFromResume?Hide=true|false` ——「从继续观看里移除 / 恢复」。
+ *
+ * 只翻 `playback.hidden`，**不动位置**（真机实测同此：隐藏前后 `UserData` 一个字段都没变）——
+ * `Hide=false` 之后位置还在，回来还是原来那一行。重新开始播放会**自动取消隐藏**（见 `recordPlayback`）。
+ *
+ * 库里**没有这一行**时：隐藏 → 写一行**占位**（否则"移除"记不住，下次拉列表它又回来；
+ * 实测 SenPlayer 就会对「接着看」里那条还没看过的下一集发这条）；恢复 → 不动库。
+ * 读侧随之要跳过被隐藏的：`Items/Resume` 与 `Shows/NextUp` 都排除 `hidden`
+ * （见 `db.listResume` / `db.listRecentBySeries`，以及 `nextEpisodeItem` 里"往后找下一个没被隐藏的集"）。
+ *
+ * 回 **200 + 该条目的 `UserData`**；Id 认不出 → **204 且不写库**（记一行日志）。
+ */
+function setHiddenFromResume(req, requestedUserId, rawItemId, hide) {
+  const denied = authorize(req, requestedUserId);
+  if (denied) return denied;
+  const sess = sessionOf(req);
+  if (!sess) return { status: 401, body: { error: '需要有效的 AccessToken' }, log: 'token 校验不过' };
+
+  const t = playableOf(rawItemId);
+  if (!t) {
+    return {
+      status: 204,
+      body: null,
+      log: `HideFromResume 的 ItemId 认不出（不是本面板发出去的电影/集 Id）→ 不写库：${rawItemId || '(空)'}`,
+    };
+  }
+  const hadRow = !!db.getPlayback(sess.account_id, t.itemId);
+  const changed = db.setHidden(sess.account_id, t.itemId, hide, t);
+  return {
+    status: 200,
+    body: userDataOf(sess.account_id, t.itemId),
+    log:
+      `${hide ? '移出' : '恢复'}「继续观看」${t.itemId}` +
+      (hide && !hadRow ? '（库里本来没有这条 → 写一行占位记住它）' : '') +
+      (!hide && !hadRow ? '（库里本来就没有这条 → 不动库）' : ''),
+  };
+}
+
+/**
+ * `POST|DELETE /Users/{UserId}/PlayedItems/{ItemId}` ——「标记已看 / 标记未看」。
+ *
+ *   · 已看（`POST`）→ `played=1`、位置归零、`play_count` **抬到至少 1**（真机实测：`0 → 1`、`1 → 1`，
+ *     它不是每次 +1）—— 于是它从「继续观看」消失、进「已看」；
+ *   · 未看（`DELETE`）→ `played=0`、位置归零、`play_count` 归 0 —— 行**留着**：
+ *     时长与季集坐标对「接下来看」还有用，重看时也不必重新攒。
+ *
+ * 回 **200 + 该条目的 `UserData`**（真机这两条回的就是 `UserItemDataDto`）；认不出的 Id → **204 且不写库**。
+ */
+function setPlayed(req, requestedUserId, rawItemId, played) {
+  const denied = authorize(req, requestedUserId);
+  if (denied) return denied;
+  const sess = sessionOf(req);
+  if (!sess) return { status: 401, body: { error: '需要有效的 AccessToken' }, log: 'token 校验不过' };
+
+  const t = playableOf(rawItemId);
+  if (!t) {
+    return {
+      status: 204,
+      body: null,
+      log: `PlayedItems 的 ItemId 认不出（不是本面板发出去的电影/集 Id）→ 不写库：${rawItemId || '(空)'}`,
+    };
+  }
+  const prev = db.getPlayback(sess.account_id, t.itemId) || {};
+  const wasPlayed = !!prev.played;
+  db.upsertPlayback(sess.account_id, t.itemId, {
+    positionTicks: 0,
+    /* 传 0 = **保持库里已有的时长**（upsert 里的 CASE 只在传入 > 0 时才覆盖）——
+     * 标记已看 / 未看都不该把客户端上报过的时长弄丢。 */
+    runtimeTicks: Number(prev.runtime_ticks) || 0,
+    played,
+    /* 「标记已看」把 `play_count` **抬到至少 1**（真机两次实测都吻合：`0 → 1`、`1 → 1`）——
+     * 它不是"每次 +1"，那是播放上报的事；「标记未看」归 0（真机实测同此）。 */
+    playCount: played ? Math.max(1, Number(prev.play_count) || 0) : 0,
+    seriesId: t.seriesId,
+    season: t.season,
+    episode: t.episode,
+  });
+  return {
+    status: 200,
+    body: userDataOf(sess.account_id, t.itemId),
+    log: `${played ? '标记已看' : '标记未看'} ${t.itemId}` + (played && wasPlayed ? '（本来就是已看）' : ''),
   };
 }
 
@@ -542,7 +668,9 @@ async function progressList(rows, accountId, label) {
   return {
     status: 200,
     body: { Items: items, TotalRecordCount: items.length },
-    log: `${label}：库里 ${rows.length} 条 → 列出 ${items.length} 条${skipped ? `（${skipped} 条取不到元数据，未列出）` : ''}`,
+    log:
+      `${label}：库里 ${rows.length} 条 → 列出 ${items.length} 条${skipped ? `（${skipped} 条取不到元数据，未列出）` : ''}` +
+      briefIds(items),
   };
 }
 
@@ -886,7 +1014,8 @@ async function getNextUp(requestedId, req, query) {
     log:
       `接下来看：库里 ${rows.length} 部在追 → 列出 ${items.length} 条` +
       (wantSeries ? `（只问 ${wantSeries}）` : '') +
-      (skipped ? `（${skipped} 部算不出下一集，未列出）` : ''),
+      (skipped ? `（${skipped} 部算不出下一集，未列出）` : '') +
+      briefIds(items),
   };
 }
 
@@ -901,12 +1030,28 @@ async function nextEpisodeItem(row, accountId) {
   let season = p.season;
   let episode = p.episode;
   if (row.played) {
-    episode = p.episode + 1;
-    if (!(await episodeExists(p.tmdbId, season, episode))) {
-      season = p.season + 1;
-      episode = 1;
-      if (!(await episodeExists(p.tmdbId, season, episode))) return null;
+    /* 已看完 → 往后找**真实存在、且没被隐藏**的那一集：同一季里往后退；
+     * 本季到头就试下一季第 1 集（只试一次，与原来的口径一致）；
+     * **被隐藏的集跳过** —— 客户端"从继续观看里移除"的就是它在列表里点的那一条，
+     * 移除之后该让位给下一集（真机实测：隐藏会让那条从「Resume」消失）。
+     * 上限 50 次：源与 TMDB 对不上时别在这里空转，找不到就如实跳过这部剧（ADR-0008）。 */
+    let cur = { season, episode: p.episode + 1 };
+    let fellBack = false;
+    let found = null;
+    for (let i = 0; i < 50 && !found; i += 1) {
+      if (!(await episodeExists(p.tmdbId, cur.season, cur.episode))) {
+        if (fellBack) break; // 下一季第 1 集也不存在 → 放弃
+        fellBack = true;
+        cur = { season: p.season + 1, episode: 1 };
+        continue;
+      }
+      const id = tmdb.itemId('tv', p.tmdbId, cur.season, cur.episode);
+      if (Number((db.getPlayback(accountId, id) || {}).hidden) === 1) cur = { season: cur.season, episode: cur.episode + 1 };
+      else found = cur;
     }
+    if (!found) return null;
+    season = found.season;
+    episode = found.episode;
   }
 
   const nextId = tmdb.itemId('tv', p.tmdbId, season, episode);
@@ -2985,6 +3130,8 @@ module.exports = {
   getViews,
   getResume,
   recordPlayback,
+  setHiddenFromResume,
+  setPlayed,
   getStudios,
   getNextUp,
   getItemCounts,

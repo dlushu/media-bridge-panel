@@ -7,13 +7,17 @@
  *   POST /api/emby/Users/AuthenticateByName  登录：校验面板账号（见「Emby → 账号管理」）
  *   GET  /api/emby/Users/{UserId}            取用户资料
  *   GET  /api/emby/Users/{UserId}/Views      媒体库列表（每个启用的首页插件行 = 一个库；不再是留白）
- *   GET  /api/emby/Users/{UserId}/Items/Resume   继续观看（**如实回空**：没有观看记录；必须注册在 Items/{ItemId} 之前）
+ *   GET  /api/emby/Users/{UserId}/Items/Resume   继续观看（读 `playback` 表的未看完条目；必须注册在 Items/{ItemId} 之前）
  *   GET  /api/emby/Users/{UserId}/Items      条目列表（列表数据由首页模块决定：认 ParentId=<库Id>；其余如实空）
  *   GET  /api/emby/Users/{UserId}/Items/{ItemId}  单条详情（元数据 TMDB + 源绑定走本模块设置里的聚合地址）
+ *   POST /api/emby/Users/{UserId}/Items/{ItemId}/HideFromResume  「从继续观看里移除 / 恢复」（`Hide=false` 恢复）
+ *   POST|DELETE /api/emby/Users/{UserId}/PlayedItems/{ItemId}    「标记已看 / 未看」（POST=已看、DELETE=未看）
+ *   POST /api/emby/Sessions/Playing[/Progress|/Stopped]  客户端播放上报（落库，见下面「播放进度上报」）
  *   POST /api/emby/Items/{ItemId}/PlaybackInfo   播放信息（版本清单 = 线路，Path 指向下面的 Stream）
  *   GET  /api/emby/Items/{ItemId}/Stream         拉流（现取地址后**一律 302**；本地部署的源会把回环地址换成客户端域名）
- *   GET  /api/emby/videos/{ItemId}/stream[.{ext}] 直连播放（**Emby 标准端点**：实测客户端播直连时
- *                                                走的是这条 + MediaSourceId，而不是上面那条 Path）
+ *   GET  /api/emby/videos|Videos/{ItemId}/stream[.{ext}]  直连播放（**Emby 标准端点**：实测客户端播直连时
+ *                                                走的是这条 + MediaSourceId，而不是上面那条 Path；
+ *                                                两种大小写都注册 —— 小写是早期日志实录，大写是 Emby 官方路径）
  *   GET  /api/emby/Shows/{Id}/Seasons        剧的季列表（**占位**：TMDB 的 seasons[]；UserId 在 query 里）
  *   GET  /api/emby/Shows/{Id}/Episodes       某一季的分集（**占位**：TMDB season 接口；UserId/SeasonId 在 query 里）
  *   GET  /api/emby/Items/{Id}/Images/{type}  图片（**豁免 token**；tag = `cpimg.<base64url(URL)>.<签名>`，验签不过 404；支持 `/Images/{type}/{index}`）
@@ -88,6 +92,20 @@ function serveStream(req, res, out, label) {
   log.logResult(req, `拉流 ${label}`, { status: 302, log: out.log });
   res.writeHead(302, { Location: out.stream.url, 'Cache-Control': 'no-store' });
   return res.end();
+}
+
+/**
+ * 把 `{status, body}` 落到响应上：**没有 body 就 204 空体**。
+ *
+ * 播放上报与几个写端点共用 —— 这类端点的 body 本来就是可选的：有就回 JSON
+ * （客户端拿它更新界面上的「已看 / 继续观看」），没有就一个字节都不回。
+ */
+function sendOut(res, out) {
+  if (!out.body) {
+    res.writeHead(204, { 'Cache-Control': 'no-store' });
+    return res.end();
+  }
+  return sendJson(res, out.status, out.body);
 }
 
 module.exports = function routes(r) {
@@ -363,11 +381,10 @@ module.exports = function routes(r) {
    *
    * `MediaSourceId` 自带站点/线路/vod（**base64url 编在 Id 里**，见 service.catpawSourceId），所以这里没有额外参数；
    * `Static=true` 表示要直连（不转码），与一律 302 的语义一致。
-   * 路径段小写 `videos` 是日志实录 —— 路由**区分大小写**，就按实录注册。
    * `:file` 只认 `stream` / `stream.<扩展名>`（后缀来自 `MediaSource.Container`）；`original.mkv` 之类
    * 没在任何日志里出现过，仍按「未实现」记日志 + 501，不提前猜。
    */
-  r.add('GET', '/api/emby/videos/:itemId/:file', async (req, res, { params, query, pathname }) => {
+  const serveDirectVideo = async (req, res, { params, query, pathname }) => {
     /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401 */
     const denied = service.authorize(req, query.get('UserId'));
     if (denied) {
@@ -385,7 +402,12 @@ module.exports = function routes(r) {
       req.headers.host || '' // 本地部署的源回的地址是回环地址，302 前要用它换成客户端那个域名
     );
     return serveStream(req, res, out, `videos/${params.itemId}/${params.file}`);
-  });
+  };
+  /* **两种大小写都注册**：路由是**区分大小写**的，而两条实录都得认 —— 小写 `videos` 是早期日志
+   * （emby#39~#45），大写 `Videos` 是 Emby 官方路径（实测 Lumenic/1.0.0 打的就是大写：
+   * 先白吃一个 501，随后才退回小写拿到 302）。同一条实现，不复制逻辑。 */
+  r.add('GET', '/api/emby/videos/:itemId/:file', serveDirectVideo);
+  r.add('GET', '/api/emby/Videos/:itemId/:file', serveDirectVideo);
 
   /* 相似推荐：按条目的 tmdb 坐标反查 TMDB（与季/集同类，归 emby 层，不走首页模块） */
   r.add('GET', '/api/emby/Items/:itemId/Similar', async (req, res, { params, query }) => {
@@ -604,15 +626,37 @@ module.exports = function routes(r) {
       }
       const out = service.recordPlayback(req, kind, body);
       log.logResult(req, `播放上报 Sessions/${label}`, out, log.queryBrief(query));
-      if (!out.body) {
-        res.writeHead(204, { 'Cache-Control': 'no-store' });
-        return res.end();
-      }
-      return sendJson(res, out.status, out.body);
+      return sendOut(res, out);
     });
   playbackReport('start', 'Playing');
   playbackReport('progress', 'Playing/Progress');
   playbackReport('stop', 'Playing/Stopped');
+
+  /* ---------------- 观看状态的**写**端点（客户端改「继续观看」「已看」） ----------------
+   * 三条都是实测在打的：
+   *   · `POST Users/{UserId}/Items/{ItemId}/HideFromResume?Hide=true|false` —— Rex/0.1.0，「从继续观看里移除」；
+   *   · `POST Users/{UserId}/PlayedItems/{ItemId}` —— SenPlayer/6.2.1，「标记已看」；
+   *   · `DELETE Users/{UserId}/PlayedItems/{ItemId}` —— 同上，「标记未看」。
+   * 一律**校验 token**（动的是某个账号的观看记录，见 ADR-0009），回 **200 + 该条目的 `UserData`**；
+   * Id 认不出 → **204 且不写库**（与三条上报同口径 —— 客户端只是想让状态变一下，回错会弹错误框）。
+   * ⚠️ 必须注册在下面的通配之前，否则又是 501。
+   */
+  r.add('POST', '/api/emby/Users/:userId/Items/:itemId/HideFromResume', (req, res, { params, query }) => {
+    /* `Hide` 缺省当 true —— 端点名字就是 Hide，客户端只在要恢复时才带 `false` */
+    const hide = String(query.get('Hide') || '').toLowerCase() !== 'false';
+    const out = service.setHiddenFromResume(req, params.userId, params.itemId, hide);
+    log.logResult(req, `继续观看开关 Users/…/Items/${params.itemId}/HideFromResume`, out, log.queryBrief(query));
+    return sendOut(res, out);
+  });
+
+  /* 标记已看 / 未看：同一个处理器，只差 `played`（真机是 POST = 已看、DELETE = 未看） */
+  const playedItems = (played) => (req, res, { params, query }) => {
+    const out = service.setPlayed(req, params.userId, params.itemId, played);
+    log.logResult(req, `标记${played ? '已看' : '未看'} Users/…/PlayedItems/${params.itemId}`, out, log.queryBrief(query));
+    return sendOut(res, out);
+  };
+  r.add('POST', '/api/emby/Users/:userId/PlayedItems/:itemId', playedItems(true));
+  r.add('DELETE', '/api/emby/Users/:userId/PlayedItems/:itemId', playedItems(false));
 
   /* ---------------- 通配：其余一切 /api/emby/** ---------------- */
 

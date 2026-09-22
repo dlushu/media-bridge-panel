@@ -57,6 +57,38 @@ body 里 `ItemId` **就是本面板发出去的 Id**（`tmdb_{id}_tv_s{n}_e{m}` 
   （用客户端上报的时长）。只给 `PlaybackPositionTicks` 而条目又没有时长时，客户端界面上就是
   **光秃秃没有进度条**。另补 `LastPlayedDate`（进度行最后更新的时间）。
 
+## 补充：客户端也能**改**观看状态（三个写端点，`SCHEMA_VERSION` 3 → 4）
+
+读端点出真数据之后，客户端就开始来管这一行了 —— 实测三条（都是 501，现已收下）：
+
+- `POST Users/{UserId}/Items/{ItemId}/HideFromResume?Hide=true|false`（Rex/0.1.0、SenPlayer/6.2.1 都发过）
+  =「从继续观看 / 接着看里移除、恢复」。**只翻 `hidden`，不动位置**（真机实测：隐藏前后 `UserData` 一个字段都没变）；
+  **重新开始播放（`Sessions/Playing`）自动取消隐藏** —— 隐藏过的条目不会永远回不来。
+  库里**没有这一行**时：隐藏 → 写一行**占位**（位置 0、带季集坐标）；恢复 → 不动库。
+  为什么必须记下来：客户端移除的常常是「接着看」里那条**还没看过的下一集**（库里本来没有它的行），
+  不记则下次拉列表它又回来（实测 SenPlayer 就是这样"移除了却还在"）。
+  读侧因此一起跳过被隐藏的：`Items/Resume`（`db.listResume`）与 `Shows/NextUp`
+  （`db.listRecentBySeries` 排除 + `nextEpisodeItem` 往后找**下一个没被隐藏的集**）。
+- `POST|DELETE Users/{UserId}/PlayedItems/{ItemId}`（SenPlayer/6.2.1）=「标记已看 / 未看」：
+  已看 → `played=1`、位置归零、**`play_count` 不动**；未看 → `played=0`、位置归零、`play_count` 归 0；
+  **行留着**（时长与季集坐标对 `NextUp` 还有用，重看时也不必重新攒）。
+- 三条一律**校验账号**（动的是某个账号的观看记录，见 [0009](0009-unauthenticated-empty-responses.md)）。
+  `ItemId` 认不出 → **204 且不写库**（与三条上报同口径 —— 客户端只是想让状态变一下，回错会弹错误框）。
+- **真机实测（Emby 4.9.5.0，`2026-09-23`；每次探测前后都把状态还原，`UserData` 逐字段比对一致）**：
+  - `HideFromResume` 回 **200 + `UserItemDataDto`**，且 **`UserData` 一个字段都没动**；
+    隐藏的正是「接着看」那一条时，它**从 `Resume` 消失**，`Hide=false` 之后回来
+    ⇒ **隐藏 = 从"接着看"里拿掉这一条**（本层照此实现，并因此让 `NextUp` 也跳过隐藏项）。
+  - `PlayedItems` 的 POST / DELETE 都回 **200 + `UserItemDataDto`**：POST 把 `Played` 翻成 true、
+    `PlayCount` **抬到至少 1**（实测 `0 → 1`、`1 → 1`，不是每次 +1）；DELETE 把 `PlayCount` 归 0
+    并**去掉 `LastPlayedDate`**。
+  - **真机的 `Shows/NextUp` 始终为空**（三种条件都试过：标记已看、真实播放进度、正规集号）——
+    它把"接着看的下一集"放在 `Resume` 里（`PlaybackPositionTicks: 0`）。所以"隐藏是否影响 `NextUp`"
+    **在真机上问不出来**，本层按上面那条语义自己定，并在这一条写明。
+  - 本层**刻意的一处差异**：重新开始播放会**自动取消隐藏**（真机这一点未测），免得一个手滑就永远回不来。
+
+⚠️ `hidden` 是**加列**迁移：`ALTER TABLE` + `PRAGMA table_info` 判幂等。上面那句
+`CREATE TABLE IF NOT EXISTS` 对**已存在的表**不补列 —— 老库会少一列，然后所有读查询直接报错。
+
 ## 理由
 
 - 客户端已经在按协议上报，面板是唯一缺口：接住它，四个读端点一起活过来，**不需要客户端配合**。
