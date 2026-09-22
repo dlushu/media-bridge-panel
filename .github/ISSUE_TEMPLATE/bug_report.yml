@@ -1,0 +1,53 @@
+name: 问题反馈
+description: 报告一个可复现的问题
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先搜索已有 Issue。**安全问题请勿在此提交**，走 [SECURITY.md](../blob/main/SECURITY.md) 里的私密渠道。
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 面板版本或镜像 tag（面板内见「面板设置」，或 `docker images`）
+    validations:
+      required: true
+  - type: dropdown
+    id: deploy
+    attributes:
+      label: 部署方式
+      options:
+        - Docker（官方镜像）
+        - Docker（自行构建）
+        - 源码（npm start）
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 尽可能具体。面板「聚合搜索」页的「这条的版本」可以复现大部分链路，带上它更有帮助。
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: 预期结果与实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志
+      description: 面板「面板设置 → 日志」页的内容，或容器日志
+      render: text
+    validations:
+      required: false
+  - type: input
+    id: env
+    attributes:
+      label: 运行环境
+      description: 设备与系统（如 OpenWrt aarch64、群晖 x86_64）、Node 版本、所使用的客户端及版本
+    validations:
+      required: false

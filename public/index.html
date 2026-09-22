@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0e1210" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <!-- ⚠️ 名字的**权威**在 core/branding.js（启动后 JS 会覆盖标题与顶栏）；这里这份只是首屏兜底 -->
+  <title>媒体桥面板</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="appbar">
+      <button id="navToggle" class="nav-toggle" aria-label="展开/折叠导航" aria-expanded="true" title="展开/折叠导航">☰</button>
+      <div class="brand">
+        <b>媒体桥面板</b>
+      </div>
+    </header>
+
+    <div id="empty" class="empty">
+      <div class="empty-inner">
+        <div class="empty-icon"><span class="spinner" style="width:22px;height:22px;border-width:3px"></span></div>
+        <h2>正在连接后端服务…</h2>
+        <p class="muted">如果长时间停在这里，说明没连上后端：请在项目目录执行 <code>npm start</code>，再用它启动后打印的地址打开面板。</p>
+      </div>
+    </div>
+
+    <div id="workspace" class="workspace hidden">
+      <div class="body">
+        <nav class="nav" id="nav">
+          <button data-module="source" class="active">源托管<span class="nav-badge" id="navSrcBadge"></span></button>
+          <button data-module="agg">聚合设置<span class="nav-badge" id="navAggBadge"></span></button>
+          <button data-module="emby">Emby</button>
+          <button data-module="panel">面板设置</button>
+        </nav>
+        <div class="content">
+          <div class="subnav" id="subnav"></div>
+          <section id="view" class="view"></section>
+        </div>
+      </div>
+      <div class="nav-scrim" id="navScrim"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <!-- 单入口：app.js 是 ES 模块，各模块由它 import（接口文档数据也已改为模块，不再有 window.DOCS） -->
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

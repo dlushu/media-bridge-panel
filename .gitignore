@@ -1,0 +1,18 @@
+# 依赖与系统文件
+node_modules/
+.DS_Store
+
+# 日志（含「清空请求」轮转出来的 .bak）
+*.log
+emby.log.bak
+
+# 本地工具/会话目录（编辑器、agent 临时脚本）
+.codebuddy/
+
+# 运行时数据：源 bundle、缓存 db、以及可能含网盘 cookie/token 的源 profile
+data/
+
+# 容器与部署：不属于项目源码，只在本机保留
+#   Dockerfile / docker-compose*.yml / bundle.sh / publish.sh / compose 部署记录 / 构建产物
+# 删除本行即可把部署文件一并纳入版本库。
+docker/

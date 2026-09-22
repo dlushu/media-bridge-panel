@@ -1,0 +1,574 @@
+:root {
+  --bg: #0e1210;
+  --bg-2: #151a17;
+  --bg-3: #1c2320;
+  --line: #263029;
+  --line-2: #33403a;
+  --fg: #e3e8e2;
+  --fg-dim: #9aa79e;
+  --fg-dim-2: #6f7d74;
+  --accent: #8cda60;
+  --accent-2: #5fae3a;
+  --accent-dim: #2b4a1e;
+  --warn: #ffb84d;
+  --err: #ff7a6b;
+  --blue: #6fb6ff;
+  --radius: 12px;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: radial-gradient(1200px 600px at 80% -10%, #1b2a1c 0%, var(--bg) 55%);
+  color: var(--fg);
+  font: 14px/1.55 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+.hidden { display: none !important; }
+.muted { color: var(--fg-dim); }
+
+.app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden; }
+.appbar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 20px; border-bottom: 1px solid var(--line);
+  background: rgba(14, 18, 16, .92); backdrop-filter: blur(8px);
+  flex: none;
+}
+
+/* ---------------- 顶栏 ---------------- */
+.brand { display: flex; gap: 8px; align-items: center; font-size: 15px; letter-spacing: .3px; white-space: nowrap; }
+.spacer { flex: 1; }
+
+.add-form { padding: 0 16px 14px; display: flex; flex-direction: column; gap: 8px; }
+.add-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+
+/* ---------------- 表单控件（形状与高度统一） ----------------
+ * ⚠️ 选择器写得**宽**是有意的：原来只写 `input[type=text], input[type=number]`，
+ * 于是 `type=password`（账号管理 / TMDB Token）、`type=url`、`type=search` **一点样式都没有** ——
+ * 在暗色界面上就是一块浏览器默认的白框。除 checkbox / radio / file 外一律纳入。
+ * 高度统一 34px：**输入框、下拉、按钮三者对齐**，同一行里不再高低不齐。 */
+input:not([type='checkbox']):not([type='radio']):not([type='file']),
+select,
+textarea {
+  background: var(--bg-3);
+  border: 1px solid var(--line-2);
+  color: var(--fg);
+  border-radius: 9px;
+  padding: 0 10px;
+  font: inherit;
+  outline: none;
+  width: 100%;
+  height: 34px;
+  transition: border-color .15s, box-shadow .15s;
+}
+input:not([type='checkbox']):not([type='radio']):not([type='file']):focus,
+select:focus,
+textarea:focus { border-color: var(--accent-2); box-shadow: 0 0 0 2px rgba(140, 218, 96, .12); }
+input::placeholder, textarea::placeholder { color: var(--fg-dim-2); }
+input:disabled, select:disabled, textarea:disabled { opacity: .5; cursor: not-allowed; }
+
+textarea {
+  height: auto;
+  min-height: 74px;
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+/* 下拉：**吃掉原生箭头**（各家平台画得都不一样，暗色下最难看的一处），自己画一个 */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 30px;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5l5-5' fill='none' stroke='%239aa79e' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 10px 7px;
+}
+/* 展开的原生列表由系统绘制，但能染色的地方染一下（Firefox/部分 Chrome 生效） */
+select option { background: var(--bg-3); color: var(--fg); }
+
+/* 文件选择框（首页插件上传）：让那个原生按钮看起来像本项目的 .btn */
+input[type='file'] { width: 100%; font: inherit; color: var(--fg-dim); }
+input[type='file']::file-selector-button {
+  font: inherit;
+  margin-right: 10px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 9px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-2);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.chk { display: flex; align-items: center; gap: 6px; color: var(--fg-dim); font-size: 12.5px; white-space: nowrap; }
+.chk input[type='checkbox'], .chk input[type='radio'] { accent-color: var(--accent-2); width: 14px; height: 14px; }
+
+/* ---------------- 表单布局原语 ----------------
+ * 之前**没有这些**：每个页面自己写 `style:'flex:1;min-width:240px'`、`'font-size:12px;margin-top:10px'`，
+ * 全前端 89 处内联样式就是这么来的（`min-width` 有 14 个不同值、`font-size:12px` 手写 19 次）。
+ *
+ * 规矩：**页面里不写 style**，用下面这几个类拼。
+ * 间距用**下边距**给（每个块自己带 10px），最后一块由 `.card > :last-child` 收掉尾巴 ——
+ * 比"相邻兄弟选择器"简单，也不会因为插了一个新元素就丢掉间距。 */
+.field { display: flex; flex-direction: column; gap: 6px; min-width: 0; margin-bottom: 10px; }
+.field > label { font-size: 12px; color: var(--fg-dim); }
+.note { font-size: 12px; color: var(--fg-dim); line-height: 1.6; margin-bottom: 10px; }
+/* `.toolbar` 与 `.row` 是**同一个东西**（历史上有两个名字）—— 一起定义，写法逐步统一到 `.row`
+ * ⚠️ 用 `align-items: center` 而不是 `flex-end`：行里混着 34px 控件、
+ * 26px 的 `.btn.mini`、19px 的说明文字，底对齐会让它们的**中心线各不相同**（实测差 4~7px，
+ * 看着就是"没对齐"）。居中对齐后谁高谁矮都站在同一条中线上。
+ * （原来底对齐是为了 `.field`（label 在上、input 在下）能和裸控件对齐 —— 实测全项目 `.field`
+ *  只出现在模态框里（纵向排），行里没有，所以不必为它让步。） */
+.row,
+.toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+.row > .field,
+.toolbar > .field { flex: 1 1 200px; } /* 弹性宽度 + 自动换行；页面里不再写 min-width */
+/* 控件直接放进行里也行（省一层 wrapper）：同样弹性、同样不撑破。
+ * ⚠️ 少了这条，控件会吃到基础规则里的 `width:100%` —— 一行就被撑断（agg 页踩过）。 */
+.row > :is(input, select, textarea),
+.toolbar > :is(input, select, textarea) { flex: 1 1 200px; min-width: 0; }
+/* 窄字段（语言、端口这类）与"随内容"的：宽度写在**这里一处**，不在页面里 */
+.row > .field.narrow,
+.toolbar > .field.narrow { flex: 0 1 110px; }
+.row > .field.auto,
+.toolbar > .field.auto { flex: 0 0 auto; }
+.row > .btn, .row > .note, .row > .chk, .row > .w-sm, .row > .w-md,
+.toolbar > .btn, .toolbar > .note, .toolbar > .chk { flex: none; }
+/* `.spacer` 保持基础规则里的 `flex:1`（把后面的东西推到另一头） */
+/* 勾选标签给控件同样的高度（文本随之落在同一条中线上） */
+.row > .chk,
+.toolbar > .chk { height: 34px; }
+/* 说明文字与字段块在行里**都不留块级下边距** —— `.note`/`.field` 自带 `margin-bottom:10px`，
+ * 在 flex 行里会让它们整体上移 5px（居中对的是"外边距盒"）。实测就是它把行里的元素顶偏的。 */
+.row > .note,
+.toolbar > .note,
+.file-row > .note,
+.row > .field,
+.toolbar > .field { margin-bottom: 0; }
+/* 行内窄数字框（缓存上限 / 分页 / 超时那类）—— 宽度写在**这里一处**，页面里只写类名 */
+.row > .w-sm { flex: 0 1 90px; }
+.row > .w-md { flex: 0 1 120px; }
+/* 输入框在 `.chk`（label）里时的宽度档位 —— `.row > .w-*` 那几条只对**直接子元素**生效，
+ * 而"开关 + 数字框"这种写法输入框是包在 label 里的，那些规则吃不到，宽度就随默认（约 120px）。
+ * ⚠️ 不要"把所有数字框一律收窄"：`0.85` 这类值会被夹掉，显示不全。
+ *   w-xs 56px（季/集/年份/页）· w-sm 84px（0.85 / 3 这种）· w-md 120px（分数线、条数）· w-lg 180px（毫秒）
+ * ⚠️ 选择器里必须带 `[type='number']`：基础那条 `input:not(...):not(...):not(...)` 的权重是 (0,3,1)，
+ * 光写 `.chk > input.w-lg`（(0,2,1)）**压不过它** —— 实测宽度会变成"随内容"（写 180 实际 167），
+ * 于是"编辑框太小显示不全"那个毛病换个形式又回来了。 */
+.chk > input[type='number'].w-xs { width: 56px; }
+.chk > input[type='number'].w-sm { width: 84px; }
+.chk > input[type='number'].w-md { width: 120px; }
+.chk > input[type='number'].w-lg { width: 180px; }
+.actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; margin-bottom: 10px; }
+/* 行**放进字段块里**时不留自己的下边距（间距由 .field 的 gap 给）—— 否则
+ * 「标签 + 输入行」这种写法会在行下面多出 10px 的空当（`.card > :last-child` 只收得掉最后一块）。 */
+.field > .row,
+.field > .toolbar { margin-bottom: 0; }
+/* 块的最后一块不留尾巴（卡片底部那一截空白就是这么来的） */
+.card > :last-child,
+.view > :last-child { margin-bottom: 0; }
+
+/* 卡片之间**本来是完全贴着的**（实测 margin 0，只有两条边线相邻）—— 统一给一个间距 */
+.card + .card { margin-top: 14px; }
+/* ⚠️ 但**网格里的间距归 grid 的 gap 管** —— 那里再加 margin 会把格子挤歪（保险起见先挡掉） */
+.grid .card + .card { margin-top: 0; }
+/* 卡片里的行内输入框（账号改密那种）：不撑满、也不超过 180px */
+/* 列表行（源 / 账号 / 站点那种）：一行里放「状态点 + 名称 + 说明 + 操作」
+ * 各列宽度**固定**，否则每行名字长短不一、后面的说明与按钮就各行其是（看着就是"没对齐"）：
+ *   点 · 名称 200px · 说明（占满剩余）· 操作靠右 */
+.file-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 6px 0; }
+.file-row > .name {
+  flex: 0 0 200px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 行下面的错误说明（进程起不来、校验不过那类）—— 红字、缩进一点、可换行 */
+.err-note { color: var(--err); word-break: break-word; margin: -2px 0 8px 16px; }
+.file-row > input:not([type='checkbox']) { flex: 0 1 180px; }
+/* 行内的说明文字占剩余宽度（原来是手写 flex:1 + font-size:12px） */
+.file-row > .note { flex: 1 1 auto; min-width: 0; }
+/* 行尾的操作（按钮 / 勾选）固定宽度、顺序排 —— 它们永远贴右边同一条线上 */
+.file-row > .btn,
+.file-row > .chk { flex: none; }
+/* 日志页：日志列表本体（原来是内联的 margin:0;max-height:62vh） */
+.log-list { margin: 0; max-height: 62vh; }
+/* 工具栏里那条竖分隔线 */
+.sep { width: 1px; height: 18px; background: var(--line); }
+/* 简单项目符号列表（面板概览那类） */
+.list { margin: 0 0 10px; padding-left: 20px; line-height: 1.9; }
+/* 行内元素之间拉开 8px（徽章那种，如"同名 ×2"） */
+.ml-sm { margin-left: 8px; }
+/* 空状态页里的按钮（原来是内联 margin-top:14px） */
+.empty-inner .btn { margin-top: 14px; }
+/* 结果区里的小海报（原来是内联的 96px + 圆角） */
+.poster-sm { height: 96px; border-radius: 6px; margin-top: 8px; display: block; }
+.strong { font-weight: 600; } /* 原来是内联的 font-weight:600 */
+/* `.kv` 是紧排的定义列表、自己没有下边距 —— 它后面跟说明文字时补一个（别处不用） */
+.kv + .note { margin-top: 8px; }
+
+.btn {
+  background: var(--bg-3);
+  border: 1px solid var(--line-2);
+  color: var(--fg);
+  border-radius: 9px;
+  padding: 0 12px;
+  height: 34px; /* 与输入框/下拉同高 —— 一行里三者对齐 */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  font: inherit;
+  cursor: pointer;
+  transition: .15s;
+  white-space: nowrap;
+}
+.btn:hover { border-color: var(--accent-2); color: #fff; }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn.primary { background: linear-gradient(180deg, var(--accent), var(--accent-2)); border-color: transparent; color: #0f1a09; font-weight: 600; }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.danger:hover { border-color: var(--err); color: var(--err); }
+.btn.mini { height: 26px; padding: 0 8px; font-size: 12px; border-radius: 7px; }
+.btn.active { border-color: var(--accent); color: var(--accent); }
+
+.add-form { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.add-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-dim-2); flex: none; }
+.dot.running { background: var(--accent); box-shadow: 0 0 8px rgba(140, 218, 96, .8); }
+.dot.starting, .dot.stopping { background: var(--warn); animation: pulse 1s infinite; }
+.dot.error { background: var(--err); }
+@keyframes pulse { 50% { opacity: .3; } }
+
+.badge {
+  font-size: 10.5px; padding: 1.5px 6px; border-radius: 6px;
+  background: var(--bg-3); border: 1px solid var(--line-2); color: var(--fg-dim);
+  /* 徽章是**药丸**：折行会把"视频"拆成"视\n频"（站点表的能力列实测被挤成这样）。
+   * 短标签一律不折；真放不下就让外层容器去换行/横向滚动。 */
+  white-space: nowrap;
+}
+.badge.ok { color: var(--accent); border-color: var(--accent-dim); }
+.badge.err { color: var(--err); border-color: #4a2320; }
+
+.main { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+.empty { flex: 1; display: grid; place-items: center; padding: 24px; }
+.empty-inner { text-align: center; max-width: 540px; }
+.empty-icon { font-size: 52px; margin-bottom: 8px; }
+.empty-inner h2 { margin: 0 0 8px; font-weight: 600; }
+.empty-inner p { margin: 0; }
+.empty-inner code { background: var(--bg-3); padding: 2px 6px; border-radius: 6px; font-family: var(--mono); font-size: 12px; }
+input.switch { width: 18px; height: 18px; accent-color: var(--accent-2); cursor: pointer; }
+
+.workspace { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.body { display: flex; flex: 1; min-height: 0; }
+.content { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+
+/* 大类内部的子标签 */
+.subnav {
+  display: flex; gap: 4px; padding: 10px 18px 0;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto; flex: none;
+}
+.subnav button {
+  background: none; border: none; border-bottom: 2px solid transparent;
+  color: var(--fg-dim); padding: 8px 12px; cursor: pointer; font: inherit; white-space: nowrap;
+}
+.subnav button:hover { color: var(--fg); }
+.subnav button.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+
+/* ---------------- 模块导航 ---------------- */
+.nav-toggle {
+  flex: none; width: 34px; height: 34px; border-radius: 9px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--bg-3); border: 1px solid var(--line-2); color: var(--fg-dim);
+  font-size: 15px; line-height: 1; cursor: pointer; transition: .15s;
+}
+.nav-toggle:hover { background: var(--bg-2); color: var(--fg); }
+
+.nav {
+  width: 198px; flex: none; min-width: 0; /* min-width:0 才能折到 0 —— flex 子项默认 min-width:auto，会被内容(nowrap 的按钮)顶住 */
+  border-right: 1px solid var(--line);
+  padding: 10px 8px 20px;
+  overflow-y: auto; overflow-x: hidden;
+  background: linear-gradient(180deg, rgba(20, 26, 22, .55), transparent 240px);
+  transition: width .18s ease;
+}
+/* 折叠（宽屏）：侧栏收起、内容区顺势变宽 */
+.app.nav-collapsed .nav { width: 0; padding-left: 0; padding-right: 0; border-right-width: 0; }
+/* 折叠动画期间别让按钮文字重排 */
+.nav button { white-space: nowrap; }
+
+/* 遮罩：只有窄屏、且侧栏展开（抽屉开着）时才出现 */
+.nav-scrim { display: none; }
+.nav button {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; text-align: left;
+  background: none; border: 1px solid transparent; color: var(--fg-dim);
+  padding: 9px 12px; border-radius: 9px; cursor: pointer;
+  font: inherit; transition: .15s;
+}
+.nav button:hover { background: var(--bg-3); color: var(--fg); }
+.nav button.active { background: rgba(140, 218, 96, .10); border-color: var(--accent-dim); color: var(--accent); font-weight: 600; }
+.nav-badge { margin-left: auto; font-size: 10.5px; color: var(--fg-dim-2); font-weight: 400; }
+.nav button.active .nav-badge { color: var(--accent); }
+.soon {
+  font-size: 10px; color: var(--fg-dim-2);
+  border: 1px solid var(--line-2); border-radius: 5px;
+  padding: 1px 5px; margin-left: 6px;
+}
+.nav-sep { height: 1px; background: var(--line); margin: 10px 12px; }
+
+
+.view { flex: 1; overflow: auto; padding: 18px 22px 40px; min-height: 0; }
+.view.nopad { padding: 0; }
+
+/* ---------------- 卡片 / 表格 ---------------- */
+.grid { display: grid; gap: 12px; }
+.grid.cols-3 { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+.card { background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; }
+.card h3 { margin: 0 0 10px; font-size: 13px; color: var(--fg-dim); font-weight: 600; letter-spacing: .3px; }
+.kv { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; font-size: 13px; }
+.kv .k { color: var(--fg-dim-2); }
+.kv .v { font-family: var(--mono); font-size: 12.5px; text-align: right; word-break: break-all; }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+/* 「站点与参数」那张表：**表头不折行**（「聚合」被压成"聚\n合"过）。
+ * 「能力」列里：**一枚徽章绝不拆行**（靠 `.badge` 的 nowrap），但**徽章之间可以换行** ——
+ * 这样列不用为了"一行放下 3 枚徽章"而把整张表撑到横滚，也不会出现"视\n频"那种断字。 */
+.sites-table th { white-space: nowrap; }
+.sites-table td:last-child .badge { margin: 1px 4px 1px 0; }
+th { color: var(--fg-dim-2); font-weight: 500; font-size: 12px; }
+tbody tr:hover { background: var(--bg-3); }
+td.mono, th.mono, .mono { font-family: var(--mono); font-size: 12px; }
+
+.sec-title { margin: 22px 0 10px; font-size: 14px; color: var(--accent); font-weight: 600; }
+.sec-title:first-child { margin-top: 0; }
+
+.hint { background: rgba(111, 182, 255, .07); border: 1px solid rgba(111, 182, 255, .25); color: #cfe3ff; border-radius: 10px; padding: 10px 12px; font-size: 12.5px; margin-bottom: 14px; }
+/* 空的提示框（结果区还没填内容时）不该占一块空白 —— 直接不显示 */
+.hint:empty { display: none; }
+.hint.warn { background: rgba(255, 184, 77, .08); border-color: rgba(255, 184, 77, .3); color: #ffe3b8; }
+
+/* ---------------- 配置中心内嵌 ---------------- */
+.frame-wrap {
+  margin: 14px 22px 22px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: #0a0f1c;
+}
+iframe.embed { display: block; width: 100%; height: calc(100vh - 250px); border: 0; }
+
+/* ---------------- 接口测试 ---------------- */
+.ep-group { margin: 12px 0 0; }
+.ep-title { font-size: 12px; color: var(--fg-dim); margin-bottom: 6px; }
+
+/* ---------------- 其他 ---------------- */
+pre.json { background: #0a0d0b; border: 1px solid var(--line); border-radius: 10px; padding: 12px; overflow: auto; font-family: var(--mono); font-size: 12px; max-height: 60vh; }
+
+/* 面板「日志」页：等宽、一行一条 —— 长行**折行**而不是横向滚（日志经常很长） */
+.log-line { font-family: var(--mono); font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; padding: 1px 0; }
+.log-line[data-level="warn"] { color: var(--warn); }
+.log-line[data-level="error"] { color: var(--err); }
+
+.toast {
+  position: fixed; right: 22px; bottom: 22px; z-index: 50;
+  background: var(--bg-3); border: 1px solid var(--accent-dim); color: var(--fg);
+  padding: 11px 16px; border-radius: 10px; font-size: 13px; max-width: 460px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .5);
+  animation: slidein .18s ease-out;
+}
+.toast.err { border-color: var(--err); color: #ffd9d4; }
+@keyframes slidein { from { transform: translateY(10px); opacity: 0; } }
+
+.spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(255,255,255,.25); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -2px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------------- 当前源 / 聚合搜索 ---------------- */
+.row-input { display: flex; gap: 8px; align-items: center; }
+.row-input input { flex: 1; min-width: 0; }
+.agg-list { display: flex; flex-direction: column; gap: 8px; }
+.agg-item {
+  display: flex; gap: 12px; align-items: flex-start;
+  background: var(--bg-2); border: 1px solid var(--line);
+  border-radius: 12px; padding: 10px 12px;
+}
+/* 打分命中（会进版本列表）的条目：左侧一道高亮 —— 一屏几十条时要一眼看出"哪些真的会被用" */
+.agg-item.matched { box-shadow: inset 3px 0 0 var(--accent); border-color: var(--accent-dim); }
+.site-group {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: rgba(255, 255, 255, .012); padding: 10px 12px; margin-bottom: 12px;
+}
+.site-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-bottom: 8px; }
+.chip.tag {
+  background: rgba(140, 218, 96, .10); border-color: var(--accent-dim); color: var(--accent);
+  font-weight: 600; cursor: default;
+}
+.chip.tag:hover { border-color: var(--accent-dim); color: var(--accent); }
+pre.raw-json { margin-top: 8px; max-height: 320px; font-size: 11.5px; }
+.agg-pic { width: 58px; height: 82px; object-fit: cover; border-radius: 7px; background: var(--bg-3); flex: none; }
+.agg-pic.empty { display: block; }
+.agg-body { flex: 1; min-width: 0; }
+.agg-name { font-weight: 600; margin-bottom: 2px; }
+.agg-sources { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.chip {
+  background: var(--bg-3); border: 1px solid var(--line-2); color: var(--fg-dim);
+  border-radius: 999px; padding: 3px 10px; font-size: 12px; cursor: pointer; font-family: inherit;
+}
+.chip:hover { border-color: var(--accent-2); color: var(--accent); }
+
+/* ---------------- 接口文档 ---------------- */
+/* （`.doc-*` 这一组样式随「接口文档」页一起删掉了：聚合契约现在写在 README 里） */
+
+.code-block { margin: 10px 0 0; }
+.code-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; padding: 2px 2px 6px;
+  font-size: 11.5px;
+}
+.code-block pre.json { margin: 0; max-height: 420px; }
+
+/* ---------------- 移动端 ---------------- */
+.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.pad-x { padding-left: 22px; padding-right: 22px; }
+.pad-t { padding-top: 14px; }
+.mg-x { margin: 14px 22px; }
+
+@media (max-width: 860px) {
+  html, body { height: 100%; }
+
+  .appbar {
+    padding: calc(10px + env(safe-area-inset-top)) 14px 10px;
+    gap: 8px; position: sticky; top: 0; z-index: 20;
+  }
+  .appbar .brand b { font-size: 13.5px; }
+  /* 顶栏那只爪子图标已撤掉 */
+
+  /* 窄屏：侧栏是同一个元素、同一套状态，只是从「占位的栏」变成「盖在内容上的抽屉」——
+     收起时整个移出屏幕（transform），展开时盖在内容上并配一层遮罩。 */
+  .app .nav,
+  .app.nav-collapsed .nav {
+    position: fixed; top: 0; bottom: 0; left: 0; z-index: 30;
+    width: 236px; max-width: 80vw;
+    padding: calc(12px + env(safe-area-inset-top)) 8px calc(20px + env(safe-area-inset-bottom));
+    border-right: 1px solid var(--line);
+    background: var(--bg-2);
+    transform: translateX(-100%);
+    transition: transform .18s ease;
+  }
+  .app:not(.nav-collapsed) .nav { transform: none; box-shadow: 0 0 44px rgba(0, 0, 0, .55); }
+  .app:not(.nav-collapsed) .nav-scrim {
+    display: block; position: fixed; inset: 0; z-index: 25; background: rgba(0, 0, 0, .5);
+  }
+  .subnav { padding: 6px 10px 0; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+  .subnav::-webkit-scrollbar { display: none; }
+  .subnav button { padding: 10px 12px; }
+  .view { padding: 14px 14px calc(34px + env(safe-area-inset-bottom)); }
+  .view.nopad { padding: 0; }
+
+  /* 触控友好：输入框 16px 可避免 iOS 聚焦时自动放大（选择器与上面那条保持同一个范围） */
+  input:not([type='checkbox']):not([type='radio']):not([type='file']),
+  select,
+  textarea { font-size: 16px; height: 40px; padding-left: 12px; padding-right: 12px; }
+  select { padding-right: 32px; }
+  textarea { height: auto; padding-top: 10px; padding-bottom: 10px; }
+  .btn { height: 40px; }
+  .btn { padding: 10px 14px; }
+  .btn.mini { padding: 7px 10px; font-size: 12.5px; }
+  .chk { font-size: 13px; }
+  .chk input { width: 17px; height: 17px; }
+
+  .grid.cols-3 { grid-template-columns: 1fr; }
+  .card { padding: 13px 14px; }
+  .kv { font-size: 12.5px; }
+  .kv .v { max-width: 58%; }
+  .sec-title { margin: 18px 0 8px; }
+
+  table { font-size: 12.5px; min-width: 560px; }
+  th, td { padding: 8px 9px; }
+
+  .frame-wrap { margin: 10px 10px calc(10px + env(safe-area-inset-bottom)); }
+  /* 190px 是「顶栏 + 横向导航行 + 子标签」时代留的数，导航变成侧栏后那一行没了 */
+  iframe.embed { height: calc(100dvh - 140px); }
+  pre.json { font-size: 11.5px; }
+
+  .toast {
+    left: 12px; right: 12px;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    max-width: none; font-size: 13px;
+  }
+  .toolbar { gap: 6px; }
+  .empty-inner { padding: 0 20px; }
+  .pad-x { padding-left: 14px; padding-right: 14px; }
+  .mg-x { margin: 12px 14px; }
+  .row-input { flex-direction: column; align-items: stretch; }
+  .row-input .btn { width: 100%; }
+  .agg-pic { width: 46px; height: 66px; }
+  .agg-item { padding: 9px 10px; gap: 9px; }
+  .agg-name { font-size: 13.5px; }
+  .chip { padding: 5px 10px; }
+  /* 列表行在窄屏按「点+名称 / 说明 / 操作」三段落，别硬挤：
+   * 原来这里是 `.name { flex: 1 1 100% }` —— 名称独占整行，**状态点被挤成自己的孤儿行**，
+   * 说明与按钮再各占一行，桌面的一行到手机就散成四行、还看不出谁跟着谁。
+   * 现在名称改弹性（跟着点走），说明整行独占（文字不再被压成窄条），按钮成组换到下一行。 */
+  /* 「聚合搜索」那几行：窄屏让**最小那档**再收一点，好让"季 集 年份 + 按钮"挤在一行。
+   * ⚠️ 只收 `.w-xs` —— 一把抓会把 `0.85` 这类值夹掉，显示不全。 */
+  .view .toolbar > .chk > input.w-xs { width: 52px; }
+  .view .toolbar > .chk { gap: 4px; }
+  .file-row { flex-wrap: wrap; row-gap: 4px; }
+  .file-row > .name { flex: 1 1 auto; }
+  .file-row > .note { flex: 1 1 100%; }
+}
+
+/* 横屏手机 */
+@media (max-width: 860px) and (orientation: landscape) {
+  iframe.embed { height: calc(100dvh - 160px); }
+}
+
+/* ---------------- 模态框（添加源那类"填几个字段就提交"的操作） ---------------- */
+.modal-mask {
+  position: fixed; inset: 0; z-index: 60;
+  background: rgba(0, 0, 0, .58);
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px; animation: fadein .12s ease-out;
+}
+@keyframes fadein { from { opacity: 0; } }
+.modal {
+  background: var(--bg-2); border: 1px solid var(--line-2); border-radius: var(--radius);
+  width: min(560px, 100%); max-height: 88vh; display: flex; flex-direction: column;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, .55);
+}
+.modal-head { display: flex; align-items: center; gap: 10px; padding: 13px 16px; border-bottom: 1px solid var(--line); }
+.modal-head h3 { margin: 0; font-size: 15px; flex: 1; }
+.modal-x { background: none; border: 0; color: var(--fg-dim); font-size: 14px; cursor: pointer; padding: 3px 7px; border-radius: 7px; }
+.modal-x:hover { background: var(--bg-3); color: var(--fg); }
+.modal-body { padding: 14px 16px; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
+.modal-body > .field { margin-bottom: 0; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
+
+/* （`.file-row.centered` 那组"名称/状态居中"的规则已删掉：
+ *   居中会让每行的名字起点各不相同，反而更乱 —— 现在统一成固定列宽 + 左对齐。） */
+
+/* ---------------- 登录遮罩（面板门禁，见 core/auth.js） ---------------- */
+.auth-mask {
+  position: fixed; inset: 0; z-index: 90;
+  background: var(--bg); display: flex; align-items: center; justify-content: center; padding: 20px;
+}
+.auth-card {
+  width: min(360px, 100%); background: var(--bg-2); border: 1px solid var(--line-2);
+  border-radius: var(--radius); padding: 22px 22px 18px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, .55); display: flex; flex-direction: column; gap: 12px;
+}
+.auth-card h2 { margin: 0 0 4px; font-size: 16px; }
+.auth-form { display: flex; gap: 8px; }
+.auth-form input { flex: 1 1 auto; min-width: 0; }
+.auth-tip { color: var(--err); margin: 0; min-height: 18px; }

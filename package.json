@@ -1,0 +1,26 @@
+{
+  "name": "media-bridge-panel",
+  "version": "1.0.0",
+  "private": true,
+  "description": "媒体桥面板：托管数据源并聚合多站搜索结果，输出一份可供 Emby 兼容客户端直接使用的媒体源（当前支持猫爪 / CatPawOpen 源）",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dlushu/media-bridge-panel.git"
+  },
+  "keywords": [
+    "emby",
+    "aggregator",
+    "media",
+    "catpawopen"
+  ],
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "check": "node tools/check-syntax.js && node tools/check-style.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}
