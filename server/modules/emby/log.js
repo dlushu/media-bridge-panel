@@ -105,6 +105,52 @@ function countOf(out, key) {
   return `${key || 'items'}=${ok && Array.isArray(v) ? v.length : '-'}`;
 }
 
+/** 请求体摘要的长度上限（未实现端点的日志用） */
+const BODY_BRIEF_MAX = 300;
+
+/**
+ * 请求体摘要（**只给未实现端点的日志用**）。
+ *
+ * 为什么需要它：通配路由会把 POST 的 body 读下来，但原先**读完即丢**——
+ * 于是「客户端到底报了什么」完全看不见（播放进度那三条 `POST /Sessions/Playing*` 就是这样，
+ * 只有一个路径名，连条目 Id 和位置都无从得知）。
+ *
+ * 三条约束：
+ *   · **掩码**：沿用 query 那套 `SENSITIVE_KEY`，键名像 `api_key`/`token`/`password` 的值一律 `***`；
+ *   · **压平**：嵌套对象与数组只报形状（`{…}` / `[N 项]`），否则一条日志能到几 KB（`NowPlayingQueue` 这种）；
+ *   · **截断**：整体封顶 `BODY_BRIEF_MAX`。不是 JSON 的（半截、二进制）走原文掩码那条路。
+ *
+ * 返回**不带前缀**（调用方自己拼 `body=`）；空 body 返回 `''`。
+ */
+function bodyBrief(body) {
+  if (body === null || body === undefined || body === '') return '';
+  let text = Buffer.isBuffer(body) ? body.toString('utf8') : typeof body === 'string' ? body : JSON.stringify(body);
+  text = String(text || '').trim();
+  if (!text) return '';
+
+  let out = text;
+  try {
+    const o = JSON.parse(text);
+    if (o && typeof o === 'object' && !Array.isArray(o)) {
+      const flat = {};
+      for (const [k, v] of Object.entries(o)) {
+        if (SENSITIVE_KEY.test(k)) flat[k] = '***';
+        else if (Array.isArray(v)) flat[k] = `[${v.length} 项]`;
+        else if (v && typeof v === 'object') flat[k] = '{…}';
+        else flat[k] = v;
+      }
+      out = JSON.stringify(flat);
+    }
+  } catch {
+    /* 不是 JSON：按原文，用"键名: 值"的粗略掩码兜一层 */
+    out = text.replace(
+      /("?[A-Za-z0-9_-]*(?:pw|pwd|pass|token|secret|api[-_]?key|authorization|credential)[A-Za-z0-9_-]*"?\s*[:=]\s*)"?[^",&\s}]+/gi,
+      '$1***'
+    );
+  }
+  return out.length > BODY_BRIEF_MAX ? out.slice(0, BODY_BRIEF_MAX) + '…' : out;
+}
+
 /**
  * 未实现端点：**一行**（原来在 `monitor.js` 里要印发 path + ua/ip + headers + body，现在只留一行 ——
  * 那几行既是噪音也是内存占用的大头）。
@@ -112,13 +158,17 @@ function countOf(out, key) {
  * query **保留**（截断到 400 字符）：这是判断"客户端到底要什么"的唯一线索，
  * 删了就只剩一个路径名（`Fields=` 里往往写着它想要哪些字段）。返回序号（响应体里的 `logSeq`）。
  *
+ * **body 也保留一份摘要**（掩码 + 压平 + 限长，见 `bodyBrief`）：POST 端点没有 query，
+ * 不看 body 就完全不知道客户端报了什么（播放进度的 `ItemId` / `PositionTicks` 全在 body 里）。
+ *
  * ⚠️ **敏感参数必须掩码**：客户端把 token 塞在 query 里是常态（`?api_key=` / `?X-Emby-Token=`），
  * 原样打出来就是把凭据写进日志 —— 已实测该路径会漏出 `X-Emby-Token`（旧 `monitor.js` 同样漏）。
  */
-function logMissing(req, { pathname, query }) {
+function logMissing(req, { pathname, query, body }) {
   seq += 1;
   const shown = maskQuery(query && typeof query.toString === 'function' ? query.toString() : '');
-  console.log(`  ✘ emby 未实现#${seq} ${req.method} ${pathname}${shown ? '?' + shown : ''}${clientTag(req)}`);
+  const b = bodyBrief(body);
+  console.log(`  ✘ emby 未实现#${seq} ${req.method} ${pathname}${shown ? '?' + shown : ''}${b ? ' body=' + b : ''}${clientTag(req)}`);
   return seq;
 }
 
@@ -136,4 +186,4 @@ function maskQuery(qs) {
   return masked.length > MISSING_QS_MAX ? masked.slice(0, MISSING_QS_MAX) + '…' : masked;
 }
 
-module.exports = { clientTag, queryBrief, logResult, countOf, logMissing };
+module.exports = { clientTag, queryBrief, logResult, countOf, logMissing, bodyBrief };

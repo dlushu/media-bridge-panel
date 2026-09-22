@@ -16,7 +16,7 @@ const crypto = require('crypto');
 
 const { EMBY_DIR, EMBY_DB } = require('../../core/paths');
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 /* scrypt 参数：N=16384 单次约几十毫秒，登录是低频动作，够用。
  * maxmem 必须显式给（默认 32MiB），否则调大 N 会直接抛 memory limit exceeded。 */
@@ -69,6 +69,27 @@ function open() {
       last_seen_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id);
+    /* 播放进度 —— 客户端 POST /Sessions/Playing* 上报的东西落在这里。
+     *
+     * 一行 = 「一个账号 + 一条**可播条目**（电影 / 集）」的最后状态，**覆盖写**：
+     * 客户端每 10 秒一次心跳（实测 SenPlayer），append 会让库随播放时长线性增长，所以主键就是这两列。
+     * 关联键用 account_id —— **不是 user_id**：user_id = md5(serverId + 用户名)，
+     * serverId 丢一次或改个用户名就全变（见 service.userId）。
+     * series_id / season / episode 是集的坐标（NextUp 要用）；电影为空。 */
+    CREATE TABLE IF NOT EXISTS playback (
+      account_id     INTEGER NOT NULL,
+      item_id        TEXT    NOT NULL,
+      position_ticks INTEGER NOT NULL DEFAULT 0,
+      runtime_ticks  INTEGER NOT NULL DEFAULT 0,   -- 判"看完"用；客户端心跳里带
+      played         INTEGER NOT NULL DEFAULT 0,
+      play_count     INTEGER NOT NULL DEFAULT 0,   -- 看完才加一（与真机不同，见 docs/playback-progress.md §4.2）
+      series_id      TEXT,
+      season         INTEGER,
+      episode        INTEGER,
+      updated_at     TEXT    NOT NULL,
+      PRIMARY KEY (account_id, item_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_playback_recent ON playback(account_id, played, updated_at DESC);
   `);
   db.prepare('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)').run('schema_version', String(SCHEMA_VERSION));
 
@@ -226,6 +247,8 @@ function updateAccount(id, patch) {
 
 function removeAccount(id) {
   removeSessionsOfAccount(id);
+  /* 进度按账号存（`account_id`）—— 账号没了，那些行就成了没人认领的数据，一起删掉 */
+  removePlaybackOfAccount(id);
   return ensure().prepare('DELETE FROM accounts WHERE id = ?').run(Number(id)).changes > 0;
 }
 
@@ -288,6 +311,82 @@ function countSessions() {
   return ensure().prepare('SELECT COUNT(*) AS n FROM sessions').get().n;
 }
 
+/* ------------------------------------------------------------------ 播放进度 */
+
+function getPlayback(accountId, itemId) {
+  if (!accountId || !itemId) return null;
+  return ensure().prepare('SELECT * FROM playback WHERE account_id = ? AND item_id = ?').get(Number(accountId), String(itemId)) || null;
+}
+
+/**
+ * 覆盖写一条进度（**不 append** —— 心跳每 10 秒一条）。终值由调用方算好，这里只写。
+ *
+ * `runtime_ticks` / `series_id` / `season` / `episode` 特意做了兜底：客户端的心跳**不是每条都带
+ * `RunTimeTicks`**（实测 SenPlayer 只有部分心跳带），一次丢它就再也判不了"看完"，所以用已有的顶住。
+ */
+function upsertPlayback(accountId, itemId, p = {}) {
+  ensure()
+    .prepare(
+      `INSERT INTO playback (account_id, item_id, position_ticks, runtime_ticks, played, play_count, series_id, season, episode, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)
+       ON CONFLICT(account_id, item_id) DO UPDATE SET
+         position_ticks = excluded.position_ticks,
+         runtime_ticks  = CASE WHEN excluded.runtime_ticks > 0 THEN excluded.runtime_ticks ELSE playback.runtime_ticks END,
+         played         = excluded.played,
+         play_count     = excluded.play_count,
+         series_id      = COALESCE(excluded.series_id, playback.series_id),
+         season         = COALESCE(excluded.season, playback.season),
+         episode        = COALESCE(excluded.episode, playback.episode),
+         updated_at     = excluded.updated_at`
+    )
+    .run(
+      Number(accountId),
+      String(itemId),
+      Math.max(0, Number(p.positionTicks) || 0),
+      Math.max(0, Number(p.runtimeTicks) || 0),
+      p.played ? 1 : 0,
+      Math.max(0, Number(p.playCount) || 0),
+      p.seriesId || null,
+      Number.isFinite(p.season) ? p.season : null,
+      Number.isFinite(p.episode) ? p.episode : null,
+      new Date().toISOString()
+    );
+  return getPlayback(accountId, itemId);
+}
+
+/** 「继续观看」：有位置、还没看完，最近看的在前 */
+function listResume(accountId, limit = 20) {
+  return ensure()
+    .prepare('SELECT * FROM playback WHERE account_id = ? AND played = 0 AND position_ticks > 0 ORDER BY updated_at DESC LIMIT ?')
+    .all(Number(accountId), Math.max(1, Number(limit) || 20));
+}
+
+/** 「已看」（`Filters=IsPlayed`）：看完的，最近看的在前 */
+function listPlayed(accountId, limit = 50) {
+  return ensure()
+    .prepare('SELECT * FROM playback WHERE account_id = ? AND played = 1 ORDER BY updated_at DESC LIMIT ?')
+    .all(Number(accountId), Math.max(1, Number(limit) || 50));
+}
+
+/** 每部剧**最近**看的那一条（`Shows/NextUp` 用）：同 `series_id` 只留最新一条，按时间倒序 */
+function listRecentBySeries(accountId) {
+  const rows = ensure()
+    .prepare('SELECT * FROM playback WHERE account_id = ? AND series_id IS NOT NULL ORDER BY updated_at DESC')
+    .all(Number(accountId));
+  const seen = new Set();
+  const out = [];
+  for (const r of rows) {
+    if (seen.has(r.series_id)) continue;
+    seen.add(r.series_id);
+    out.push(r);
+  }
+  return out;
+}
+
+function removePlaybackOfAccount(accountId) {
+  return ensure().prepare('DELETE FROM playback WHERE account_id = ?').run(Number(accountId)).changes;
+}
+
 /**
  * 面板/接口返回用的安全视图 —— **只此一处**做字段映射，避免哪天不小心把 `password_hash` 回给前端。
  * 所有对外的账号响应都必须过它。
@@ -323,4 +422,10 @@ module.exports = {
   removeSession,
   removeSessionsOfAccount,
   countSessions,
+  getPlayback,
+  upsertPlayback,
+  listResume,
+  listPlayed,
+  listRecentBySeries,
+  removePlaybackOfAccount,
 };

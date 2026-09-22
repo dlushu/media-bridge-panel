@@ -56,9 +56,12 @@ const IMAGE_MAX_BYTES = 8 * 1024 * 1024;
  * 通配路由 与「路径形状被已实现端点占住、但 Id 不归它管」的请求共用 ——
  * 后者指 `Users/{UserId}/Items/{ItemId}` 这条：`Items/Resume` / `Items/Latest`（继续观看 / 最新）
  * 路径形状一样，但这里只认本面板发出去的 tmdb Id，认不出的仍按「未实现」记一行 + 501，不静默吞掉。
+ *
+ * `body` 可选（通配路由读下来的原始体）：只用来打一行摘要（掩码 + 压平 + 限长，见 `log.bodyBrief`）。
+ * POST 端点没有 query，不看 body 就无从知道客户端报了什么。
  */
-function notImplemented(req, res, { pathname, query }) {
-  const n = log.logMissing(req, { pathname, query });
+function notImplemented(req, res, { pathname, query, body }) {
+  const n = log.logMissing(req, { pathname, query, body });
   res.writeHead(501, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(
     JSON.stringify({
@@ -134,16 +137,17 @@ module.exports = function routes(r) {
   });
 
   /**
-   * 继续观看（**如实回空**）：本层不维护任何观看记录，空是如实，不是失败。
+   * 继续观看 —— 客户端 `POST /Sessions/Playing*` 上报的进度落在 `playback` 表里，这条读它。
    *
    * ⚠️ **必须注册在下面 `Users/:userId/Items/:itemId` 之前** —— 两条的路径形状完全一样
    * （`Items/Resume` 会被 `:itemId` 当成一个条目 Id 吞掉）。之前它 501 就是这个原因：
    * 落进 `:itemId` 后 `parseItemId('Resume')` 认不出 → 走 `notImplemented`。
+   *
+   * 校验账号（回的是**某个账号的观看记录**）：`service.getResume` 内部就校验了，路由层不重复。
    */
-  r.add('GET', '/api/emby/Users/:userId/Items/Resume', (req, res, { params, query }) => {
+  r.add('GET', '/api/emby/Users/:userId/Items/Resume', async (req, res, { params, query }) => {
     const q = log.queryBrief(query);
-    /* **不校验账号**：回空的响应没有数据可保护，校验只会有坏处 */
-    const out = service.getResume();
+    const out = await service.getResume(params.userId, req, query);
     log.logResult(req, `继续观看 Users/${params.userId}/Items/Resume`, out, q + " " + log.countOf(out, "Items"));
     return sendJson(res, out.status, out.body);
   });
@@ -166,18 +170,17 @@ module.exports = function routes(r) {
   });
 
   /**
-   * GET /Shows/NextUp —— 「接下来看」（SenPlayer 实测在请求该端点）
+   * GET /Shows/NextUp —— 「接下来看」（SenPlayer 实测在请求该端点，还会带 `SeriesId` 只问一部剧）
    *
-   * **如实回空**，与 `Items/Resume` 同一族（都要观看历史，本层没有）。见 `service.getNextUp`。
+   * 按库里的进度算"该看哪一集"，见 `service.getNextUp`。
    * `UserId` 在 **query**（`&UserId=…`），不在路径里 —— 与 `Shows/{Id}/Seasons` 同款。
-   * **不校验账号**：回空没有数据可保护。
    *
    * 无路由冲突：这里**没有**裸的 `Shows/:showId` 那条路由（只有 `Shows/:showId/Seasons|Episodes`），
-   * 所以 `NextUp` 不会被当成 showId 吞掉。放在这里只是让同一类的"如实回空"端点相邻。
+   * 所以 `NextUp` 不会被当成 showId 吞掉；`SeriesId` 是 query 参数，与路由形状无关。
    */
-  r.add('GET', '/api/emby/Shows/NextUp', (req, res, { query }) => {
+  r.add('GET', '/api/emby/Shows/NextUp', async (req, res, { query }) => {
     const q = log.queryBrief(query);
-    const out = service.getNextUp();
+    const out = await service.getNextUp(query.get('UserId'), req, query);
     log.logResult(req, '接下来看 Shows/NextUp', out, q + " " + log.countOf(out, "Items"));
     return sendJson(res, out.status, out.body);
   });
@@ -216,6 +219,7 @@ module.exports = function routes(r) {
     }
 
     const out = await service.getItems(params.userId, query);
+    service.applyUserData(out, params.userId, req);
     log.logResult(req, `条目列表 Users/${params.userId}/Items`, out, q + " " + log.countOf(out, "Items"));
     return sendJson(res, out.status, out.body);
   });
@@ -240,6 +244,7 @@ module.exports = function routes(r) {
     }
 
     const out = await service.getLatest(params.userId, query);
+    service.applyUserData(out, params.userId, req);
     log.logResult(req, `最新条目 Users/${params.userId}/Items/Latest`, out, q + " " + log.countOf(out, "items"));
     return sendJson(res, out.status, out.body);
   });
@@ -255,6 +260,7 @@ module.exports = function routes(r) {
     }
 
     const out = await service.getSeasons(params.showId, query.get('UserId'));
+    service.applyUserData(out, query.get('UserId'), req);
     log.logResult(req, `季列表 Shows/${params.showId}/Seasons`, out, q + " " + log.countOf(out, "Items"));
     return sendJson(res, out.status, out.body);
   });
@@ -270,6 +276,7 @@ module.exports = function routes(r) {
     }
 
     const out = await service.getEpisodes(params.showId, query.get('UserId'), query.get('SeasonId'));
+    service.applyUserData(out, query.get('UserId'), req);
     log.logResult(req, `分集列表 Shows/${params.showId}/Episodes`, out, q + " " + log.countOf(out, "Items"));
     return sendJson(res, out.status, out.body);
   });
@@ -289,6 +296,7 @@ module.exports = function routes(r) {
     /* `host` 传进去是为了让 `MediaSources[].Path` / 条目级 `Path` 是**绝对 URL**
      * （真机的 Path 也从来不是相对路径）。用请求自己的 Host —— 那正是客户端能连到的地址。 */
     const out = await service.getItem(params.itemId, params.userId, req.headers.host || '');
+    service.applyUserData(out, params.userId, req);
     log.logResult(req, `条目详情 Users/…/Items/${params.itemId}`, out, q + (out.body && out.body.CatpawSource ? " 源=" + out.body.CatpawSource.Site : ""));
     return sendJson(res, out.status, out.body);
   });
@@ -389,6 +397,7 @@ module.exports = function routes(r) {
     }
 
     const out = await service.getSimilar(params.itemId, query.get('UserId'), query.get('Limit'));
+    service.applyUserData(out, query.get('UserId'), req);
     log.logResult(req, `相似推荐 Items/${params.itemId}/Similar`, out, q + " " + log.countOf(out, "Items"));
     return sendJson(res, out.status, out.body);
   });
@@ -574,6 +583,36 @@ module.exports = function routes(r) {
    * 上传的插件产出「首页行」，本阶段只在面板内预览；映射到 Emby 端点待明确需求后再做。
    * 与账号管理同类：豁免 AccessToken，但**必须在下面通配之前注册**。 */
   require('./home/routes')(r);
+
+  /* ---------------- 播放进度上报（客户端 → 落库） ----------------
+   * 实测（SenPlayer 6.2.1，见 docs/playback-progress.md §11）：
+   *   · 开始 1 次 `POST /Sessions/Playing`；心跳每 **10 秒** 1 次 `POST /Sessions/Playing/Progress`；结束 1 次 `…/Stopped`；
+   *   · body 里 `ItemId` 就是**本面板发出去的 Id**（`tmdb_…_s{n}_e{m}` / `tmdb_…_movie`），
+   *     另有 `PositionTicks` / `RunTimeTicks`（**只有部分心跳带**）/ `MediaSourceId` / `PlaySessionId`；
+   *   · **没有 `Played` 字段，也不带 `UserId`** ⇒ "看完"只能按比例判，账号从 token 认。
+   * 三条一律回 **204 空体**（真机实测同此：它连 `Progress` 的 token 都不校验；本层按 ADR-0009 三条都校验）。
+   * ⚠️ 必须注册在下面的通配之前，否则又是 501。
+   */
+  const playbackReport = (kind, label) =>
+    r.add('POST', `/api/emby/Sessions/${label}`, async (req, res, { query }) => {
+      let body = {};
+      try {
+        body = await readBody(req);
+      } catch {
+        /* body 不是合法 JSON（或读失败）→ 当空上报处理，`recordPlayback` 会如实说"Id 认不出" */
+        body = {};
+      }
+      const out = service.recordPlayback(req, kind, body);
+      log.logResult(req, `播放上报 Sessions/${label}`, out, log.queryBrief(query));
+      if (!out.body) {
+        res.writeHead(204, { 'Cache-Control': 'no-store' });
+        return res.end();
+      }
+      return sendJson(res, out.status, out.body);
+    });
+  playbackReport('start', 'Playing');
+  playbackReport('progress', 'Playing/Progress');
+  playbackReport('stop', 'Playing/Stopped');
 
   /* ---------------- 通配：其余一切 /api/emby/** ---------------- */
 

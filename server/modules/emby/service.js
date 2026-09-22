@@ -290,6 +290,266 @@ function assertUser(requestedId) {
  * GET /Users/{UserId} —— 取用户资料（返回 UserDto 本体，不包一层）
  * 按 Id 找回对应账号：找不到时，表为空 401、否则 404。
  */
+/* ------------------------------------------------ 观看进度（写端点落库，读端点共用） */
+
+/**
+ * 「看完」的判定阈值：位置 ≥ 时长的 90%。
+ *
+ * 客户端**不报 `Played` 字段**（实测 SenPlayer 6.2.1 / Rex 0.1.0 的 body 里都没有），
+ * 所以只能按比例判 —— 阈值只此一处。真机同样是按比例判的（实测：报 95% 后 `Stopped`
+ * 即变 `Played: true`，见 docs/playback-progress.md §11）。
+ */
+const PLAYED_RATIO = 0.9;
+
+/** tick → 人话（**只给日志用**；10^7 tick = 1 秒）。日志上要一眼看出"看到了第几分钟"。 */
+function ticksText(t) {
+  const s = Math.max(0, Number(t) || 0) / 1e7;
+  if (s < 60) return `${s.toFixed(s < 10 ? 1 : 0)}s`;
+  return `${Math.floor(s / 60)}m${String(Math.round(s % 60)).padStart(2, '0')}s`;
+}
+
+/** 这个请求是哪个账号发的（token → 会话）；没带 token 或 token 无效 → null */
+function sessionOf(req) {
+  const { token } = tokenFrom(req);
+  return token ? db.findSession(token) : null;
+}
+
+/** 请求对应的账号 id：优先 token 认出的那个（权威），其次按 `UserId` 反查（客户端有时只给 UserId） */
+function accountIdFor(req, requestedUserId) {
+  const sess = sessionOf(req);
+  if (sess) return sess.account_id;
+  const acc = resolveAccountById(requestedUserId);
+  return acc ? acc.id : null;
+}
+
+/** `Limit` 查询参数 → 实际条数（默认 `def`，硬顶 100：别让一个客户端一次把整库拉走） */
+function limitOf(query, def) {
+  const v = Number(query && typeof query.get === 'function' ? query.get('Limit') : 0);
+  if (!Number.isFinite(v) || v <= 0) return def;
+  return Math.min(Math.floor(v), 100);
+}
+
+/**
+ * 库里这条的记录 → `{ userData, runtimeTicks }`；**没有记录返回 null**（调用方保持空形状）。
+ *
+ * `PlayedPercentage` 与 `LastPlayedDate` 是**实测对真机补齐**的两个字段：
+ *   · 真机在有位置的条目上给 `PlayedPercentage`（小数，如 `4.333496627087306`；位置为 0 时**不给**）；
+ *   · 客户端画进度条主要靠它 —— 只给 `PlaybackPositionTicks` 而条目又没有 `RunTimeTicks` 时，
+ *     界面上就是**光秃秃没有进度条**（对比真机发现的那次）。
+ * `LastPlayedDate` 用进度行最后一次更新的时间（就是"最后观看时间"）。
+ */
+function progressOf(accountId, itemId) {
+  if (!accountId || !itemId) return null;
+  const r = db.getPlayback(accountId, itemId);
+  if (!r) return null;
+  const position = Math.max(0, Number(r.position_ticks) || 0);
+  const runtime = Math.max(0, Number(r.runtime_ticks) || 0);
+  const userData = {
+    IsFavorite: false,
+    PlayCount: Number(r.play_count) || 0,
+    PlaybackPositionTicks: position,
+    Played: !!r.played,
+  };
+  if (position > 0 && runtime > 0) userData.PlayedPercentage = (position / runtime) * 100;
+  if (r.updated_at) userData.LastPlayedDate = String(r.updated_at).replace(/\.\d+Z$/, '.0000000Z'); // 真机是 7 位小数
+  return { userData, runtimeTicks: runtime };
+}
+
+/**
+ * 把进度与时长落到条目上（`progressItem` 与 `applyUserData` **共用同一口径**）。
+ *
+ * `RunTimeTicks` 只在条目本来没有时补：值来自**客户端上报的 `RunTimeTicks`**（源给的时长，
+ * 不是编的）；集条目通常已由 TMDB 的 `runtimeMinutes` 填过，就以那个为准。
+ */
+function applyProgressToItem(item, prog) {
+  if (!prog || !item) return item;
+  item.UserData = Object.assign({}, item.UserData || emptyUserData(), prog.userData);
+  if (!item.RunTimeTicks && prog.runtimeTicks > 0) item.RunTimeTicks = prog.runtimeTicks;
+  return item;
+}
+
+/**
+ * 就地给响应里的条目补**真实**观看状态（`UserData`）；库里没记录的条目**保持原来的空形状**
+ * （字段集合与 `emptyUserData()` 完全一致，见 ADR-0007）。
+ *
+ * 为什么做成"响应后处理"而不是给每个 DTO 都加账号参数：读侧有 6 处会产出条目 DTO
+ * （列表 / 详情 / 季 / 集 / 最新 / 相似），逐个改签名既啰嗦又容易漏；而入参形状就那么几种
+ * （`{Items:[…]}` / 裸数组 / 单条），处理一次全覆盖。数据库是**同步**的（`node:sqlite`），
+ * 所以这一步不必 async 化。
+ *
+ * 剧级条目（`tmdb_x_tv`）**不补任何东西**：进度记在集上，而"整剧是否看完"要知道总集数，
+ * 本层不知道 —— 宁可不给，也不编（ADR-0008）。
+ */
+function applyUserData(out, requestedUserId, req) {
+  const accountId = accountIdFor(req, requestedUserId);
+  if (!accountId || !out || !out.body) return out;
+  const patch = (item) => {
+    if (!item || !item.Id) return;
+    applyProgressToItem(item, progressOf(accountId, item.Id));
+  };
+  const b = out.body;
+  if (Array.isArray(b)) b.forEach(patch);
+  else if (Array.isArray(b.Items)) b.Items.forEach(patch);
+  else patch(b);
+  return out;
+}
+
+/**
+ * 三条上报端点的共同入口：`Sessions/Playing`（开始）/ `/Playing/Progress`（心跳）/ `/Playing/Stopped`（结束）。
+ *
+ * 客户端实测（SenPlayer 6.2.1，见 docs/playback-progress.md §11）：
+ *   · `ItemId` 就是**本面板发出去的 Id**（`tmdb_{id}_tv_s{n}_e{m}` / `tmdb_{id}_movie`）—— 原样回传，不做解析；
+ *   · 心跳每 10 秒一次，带 `PositionTicks`，**部分**心跳才带 `RunTimeTicks`；
+ *   · **没有 `Played` 字段** ⇒ "看完"只能按位置/时长比例判（真机同样如此）；
+ *   · 一律**不报 `UserId`** ⇒ 账号从 token 认。
+ *
+ * 响应一律 **204 空体**（真机实测三条都是 204；Progress 连 token 都不校验，但本层按 ADR-0009 校验）。
+ * 认不出的 `ItemId` **不写库**，但**记一行日志**说明被忽略 —— 不静默吞掉。
+ */
+function recordPlayback(req, kind, body) {
+  const denied = authorize(req, body && body.UserId);
+  if (denied) return denied;
+  const sess = sessionOf(req);
+  if (!sess) return { status: 401, body: { error: '需要有效的 AccessToken' }, log: 'token 校验不过' };
+
+  const p = tmdb.parseItemId(String((body && body.ItemId) || '').trim());
+  if (!p || !isPlayableId(p)) {
+    return { status: 204, body: null, log: `上报的 ItemId 认不出（不是本面板发出去的电影/集 Id）→ 不写库：${(body && body.ItemId) || '(空)'}` };
+  }
+  const itemId = tmdb.itemId(p.type, p.tmdbId, p.season, p.episode);
+  const prev = db.getPlayback(sess.account_id, itemId) || {};
+  const position = Math.max(0, Number((body && body.PositionTicks) || 0) || 0);
+  const runtime = Math.max(0, Number((body && body.RunTimeTicks) || 0) || Number(prev.runtime_ticks) || 0);
+
+  let played = !!prev.played;
+  let playCount = Number(prev.play_count) || 0;
+  let storePos = position;
+  let note = '';
+  if (kind === 'stop') {
+    const ratio = runtime > 0 ? position / runtime : 0;
+    if (body && body.Played === true) {
+      played = true;
+      playCount += 1;
+      storePos = 0;
+      note = '客户端明确说看完 → 标记已看';
+    } else if (runtime > 0 && ratio >= PLAYED_RATIO) {
+      played = true;
+      playCount += 1;
+      storePos = 0; // 已看的条目不该再出现在「继续观看」里（真机的 `PlaybackPositionTicks` 也是 0）
+      note = `位置 ${Math.round(ratio * 100)}% ≥ ${PLAYED_RATIO * 100}% → 标记已看`;
+    }
+  } else if (played && position > 0) {
+    /* 重看：已看的条目又有了进度 → 退回"未看完"，否则「继续观看」永远看不到它 */
+    played = false;
+    note = '重看 → 取消已看标记';
+  }
+
+  /* 名称里的 `kind` 直接写进日志，三种端点共用一行格式 */
+  const label = kind === 'start' ? '开始' : kind === 'progress' ? '心跳' : '停止';
+  db.upsertPlayback(sess.account_id, itemId, {
+    positionTicks: storePos,
+    runtimeTicks: runtime,
+    played,
+    playCount,
+    seriesId: p.season !== null ? tmdb.itemId('tv', p.tmdbId) : null,
+    season: p.season,
+    episode: p.episode,
+  });
+  return {
+    status: 204,
+    body: null,
+    log:
+      `${label} ${itemId} 位置 ${ticksText(storePos)}` +
+      (runtime ? ` / ${ticksText(runtime)}` : ' / 时长未知') +
+      (note ? ` · ${note}` : ''),
+  };
+}
+
+/** 账号被删时清掉它的进度（`/api/emby/accounts` 的删除走 `db.removeAccount`，那里已经带了） */
+
+/**
+ * 一条进度行 → 一条 `BaseItemDto`（「继续观看」/「已看」/「接下来看」共用）。
+ *
+ * 元数据**按坐标反查 TMDB**（走 `data/cache/tmdb.db` 缓存；播过的东西刚查过，基本是命中）。
+ * **查不到就返回 null**，由调用方跳过 —— 不编名字、不编封面（ADR-0008）。
+ * 集的拼装与 `getEpisodes()` 保持一致（同样是剧照当 Primary、`IsFolder=false`、带季集号）。
+ */
+async function progressItem(r, accountId) {
+  const p = tmdb.parseItemId(r.item_id);
+  if (!p) return null;
+  const prog = progressOf(accountId, r.item_id);
+
+  if (p.type === 'movie') {
+    const look = await tmdb.lookup({ type: 'movie', tmdbId: p.tmdbId });
+    if (!look.ok) return null;
+    const item = leanItemDto({
+      type: 'movie',
+      tmdbId: p.tmdbId,
+      parentId: defaultLibraryId(),
+      title: look.item.title,
+      year: look.item.year,
+      overview: look.item.overview,
+      communityRating: look.item.communityRating,
+      posterPath: look.item.posterPath,
+      backdropPath: look.item.backdropPath,
+    });
+    item.IsFolder = false;
+    applyProgressToItem(item, prog);
+    return item;
+  }
+
+  if (p.season === null || p.episode === null) return null; // 剧（`_tv`）本身没有进度，见 applyUserData 的说明
+  const seasonLook = await tmdb.lookupSeason({ tmdbId: p.tmdbId, season: p.season });
+  if (!seasonLook.ok) return null;
+  const e = (seasonLook.item.episodes || []).find((x) => Number(x.episodeNumber) === Number(p.episode));
+  if (!e) return null; // 这一季里没有这一集（源与 TMDB 对不上）→ 不列，不编
+
+  const showLook = await tmdb.lookup({ type: 'tv', tmdbId: p.tmdbId }); // 只为剧名（缓存里通常已有）
+  const item = baseItem({
+    id: tmdb.itemId('tv', p.tmdbId, p.season, p.episode),
+    parentId: defaultLibraryId(),
+    name: e.name || `第 ${p.episode} 集`,
+    type: 'Episode',
+    year: e.year,
+    premiereDate: e.premiereDate,
+    overview: e.overview,
+    communityRating: e.rating,
+    providerIds: { Tmdb: String(p.tmdbId) },
+    posterUrl: tmdb.imageUrlOf('w300', e.stillPath),
+  });
+  item.IsFolder = false;
+  item.IndexNumber = e.episodeNumber;
+  item.ParentIndexNumber = p.season;
+  item.SeriesId = tmdb.itemId('tv', p.tmdbId);
+  if (showLook.ok) item.SeriesName = showLook.item.title || '';
+  item.SeasonId = tmdb.itemId('tv', p.tmdbId, p.season);
+  item.SeasonName = seasonLook.item.name || `第 ${p.season} 季`;
+  if (e.runtimeMinutes) item.RunTimeTicks = e.runtimeMinutes * 600000000;
+  if (e.stillPath) item.PrimaryImageAspectRatio = 1.7777778;
+  applyProgressToItem(item, prog);
+  return item;
+}
+
+/** 一组进度行 → `QueryResult<BaseItemDto>`（取不到元数据的行**跳过并计数**，日志里说明） */
+async function progressList(rows, accountId, label) {
+  const items = [];
+  let skipped = 0;
+  for (const r of rows) {
+    const it = await progressItem(r, accountId);
+    if (it) items.push(it);
+    else skipped += 1;
+  }
+  return {
+    status: 200,
+    body: { Items: items, TotalRecordCount: items.length },
+    log: `${label}：库里 ${rows.length} 条 → 列出 ${items.length} 条${skipped ? `（${skipped} 条取不到元数据，未列出）` : ''}`,
+  };
+}
+
+/**
+ * GET /Users/{UserId} —— 取用户资料（返回 UserDto 本体，不包一层）
+ * 按 Id 找回对应账号：找不到时，表为空 401、否则 404。
+ */
 function getUser(requestedId) {
   const acc = resolveAccountById(requestedId);
   if (!acc) {
@@ -418,19 +678,20 @@ function homeViewItem(r) {
 /**
  * GET /Users/{UserId}/Items/Resume —— 首页「继续观看」
  *
- * **如实回空**：本层没有任何观看记录 —— 没有任何地方写 `UserData.PlaybackPositionTicks`，
- * 所以这里**没有东西可放**。空是**如实**，不是"留白"，也不是失败。
+ * 数据来自 `playback` 表（客户端 `POST /Sessions/Playing*` 上报的结果）：
+ * **有位置、还没看完**的条目，最近看的在前 —— 排序与真机一致（实测）。
  *
- * 为什么不留 501：客户端拿 501 会当成"服务器没这个功能"并反复重试；而"这台服务器上还没看过任何东西"
- * 本来就是 Emby 的合法状态（跟 `Filters=IsFavorite/IsPlayed` 一个道理，见指南「六」）。
- *
- * **不校验账号**：回空的响应没有数据可保护，校验只会有坏处 ——
- * 客户端不带 token 时白吃一个 401，而它本该拿到一个空列表。同理见 `getStudios`。
- *
- * 要出真数据，前提是先有观看记录（播放进度落库）—— 那是另一件事，**没做**。
+ * **必须校验账号**（与 `getStudios` 那种"回空"端点不同）：这里回的是**某个账号的观看记录**，
+ * 不校验就是跨账号泄漏（ADR-0009：回真数据的端点必须校验）。没有记录时照样回空列表 + 200 ——
+ * "这台服务器上还没看过任何东西"本来就是 Emby 的合法状态。
  */
-function getResume() {
-  return { status: 200, body: { Items: [], TotalRecordCount: 0 }, log: '没有观看记录 → 空（如实）' };
+async function getResume(requestedId, req, query) {
+  const denied = authorize(req, requestedId);
+  if (denied) return denied;
+  const accountId = accountIdFor(req, requestedId);
+  if (!accountId) return { status: 200, body: { Items: [], TotalRecordCount: 0 }, log: '账号认不出 → 空' };
+  const rows = db.listResume(accountId, limitOf(query, 20));
+  return progressList(rows, accountId, '继续观看');
 }
 
 /**
@@ -475,7 +736,11 @@ function getStudios() {
  */
 function itemsWillReturnData(query) {
   const val = (k) => (query && typeof query.get === 'function' ? query.get(k) || '' : '');
-  if (/IsFavorite|IsPlayed/i.test(val('Filters'))) return false;
+  /* 收藏：仍然一条数据都没有 → 不校验账号；
+   * **已看：现在会出真数据**（读 `playback` 表）⇒ 必须校验，否则未鉴权就能读到
+   * 某个账号的观看记录（跨账号泄漏）。这条判据被路由层与 `getItems` 共用，改一次两边同步。 */
+  if (/IsFavorite/i.test(val('Filters'))) return false;
+  if (/IsPlayed/i.test(val('Filters'))) return true;
   if (home.parseViewId(val('ParentId'))) return true;
   if (searchTermOf(query)) return true; // 按名字搜（SearchTerm，见 getItems 的搜索分支）
   if (searchProviderId(query)) return true; // 按外部 id 搜索（见 getItems 的搜索分支）
@@ -585,16 +850,81 @@ function withParentId(query, parentId) {
 /**
  * GET /Shows/NextUp —— 「接下来看」
  *
- * **如实回空**。和 `Items/Resume` 是**同一族**：
- *   · `Resume`    = 有播放进度的条目（看到一半的电影/集）
- *   · `NextUp`    = 正在追的剧里**下一集**该看哪一集（看完 S1E3 → 给 S1E4，哪怕 E4 还没点过）
- * 两者都得有**观看历史**才答得出来，而本层一条都没有（没人写 `PlaybackPositionTicks`）。
+ * 与 `Items/Resume` 同一族（都要观看历史），差别是它按**剧**回答：
+ *   · 该剧最近看的那一集**没看完** → 回它自己（接着看）；
+ *   · 已经看完 → 回**下一集**：同一季内找得到就回；找不到再试下一季第 1 集。
  *
- * 参数（`UserId` 在 query、`Limit`/`MediaTypes`/`Recursive`/`Fields`/`EnableImageTypes`）全忽略。
- * **不校验账号**：回空没有数据可保护（同 `getResume` / `getStudios`）。
+ * 「下一集」一律要**在 TMDB 的季数据里真实存在**才回 —— 不存在就跳过这部剧，不编（ADR-0008）。
+ *
+ * 参数：`SeriesId` 可选（SenPlayer 实测会带，只问某一部剧）、`UserId` 在 query；
+ * `MediaTypes` / `Recursive` / `Fields` 忽略，`Limit` 只用来截断条数。
+ * **必须校验账号**（回的是某个账号的观看记录）。
  */
-function getNextUp() {
-  return { status: 200, body: { Items: [], TotalRecordCount: 0 }, log: '没有观看记录 → 空（如实）' };
+async function getNextUp(requestedId, req, query) {
+  const denied = authorize(req, requestedId);
+  if (denied) return denied;
+  if (!accountIdFor(req, requestedId)) {
+    return { status: 200, body: { Items: [], TotalRecordCount: 0 }, log: '账号认不出 → 空' };
+  }
+  const accountId = accountIdFor(req, requestedId);
+  const wantSeries = String((query && typeof query.get === 'function' ? query.get('SeriesId') : '') || '').trim();
+  const limit = limitOf(query, 20);
+  let rows = db.listRecentBySeries(accountId);
+  if (wantSeries) rows = rows.filter((r) => r.series_id === wantSeries);
+
+  const items = [];
+  let skipped = 0;
+  for (const r of rows) {
+    if (items.length >= limit) break;
+    const it = await nextEpisodeItem(r, accountId);
+    if (it) items.push(it);
+    else skipped += 1;
+  }
+  return {
+    status: 200,
+    body: { Items: items, TotalRecordCount: items.length },
+    log:
+      `接下来看：库里 ${rows.length} 部在追 → 列出 ${items.length} 条` +
+      (wantSeries ? `（只问 ${wantSeries}）` : '') +
+      (skipped ? `（${skipped} 部算不出下一集，未列出）` : ''),
+  };
+}
+
+/**
+ * 一部剧的"接下来看"：按 `getNextUp` 的口径算出该看哪一集，再交给 `progressItem` 组装
+ * （这样带出来的是**那一集自己**的位置与已看状态，而不是"最近那条"的）。
+ */
+async function nextEpisodeItem(row, accountId) {
+  const p = tmdb.parseItemId(row.item_id);
+  if (!p || p.season === null || p.episode === null) return null;
+
+  let season = p.season;
+  let episode = p.episode;
+  if (row.played) {
+    episode = p.episode + 1;
+    if (!(await episodeExists(p.tmdbId, season, episode))) {
+      season = p.season + 1;
+      episode = 1;
+      if (!(await episodeExists(p.tmdbId, season, episode))) return null;
+    }
+  }
+
+  const nextId = tmdb.itemId('tv', p.tmdbId, season, episode);
+  const next = db.getPlayback(accountId, nextId);
+  if (next) return progressItem(next, accountId);
+  /* 下一集还没看过 → 库里没有它的行。造一条**只用于组装、不写库**的临时行，
+   * 其余字段沿用最近那条（`progressItem` 只用到 `item_id` 与坐标）。 */
+  return progressItem(
+    Object.assign({}, row, { item_id: nextId, position_ticks: 0, played: 0, season, episode }),
+    accountId
+  );
+}
+
+/** TMDB 的季数据里有没有这一集（`NextUp` 只回真实存在的下一集） */
+async function episodeExists(tmdbId, season, episode) {
+  const look = await tmdb.lookupSeason({ tmdbId, season });
+  if (!look.ok) return false;
+  return (look.item.episodes || []).some((e) => Number(e.episodeNumber) === Number(episode));
 }
 
 /**
@@ -649,7 +979,7 @@ function getItemCounts() {
  *   - `AnyProviderIdEquals=tmdb.{id}` → **按外部 id 搜一条**（回一条带本面板 Id 的条目，客户端接着进详情）
  *   - `ParentId=<catpawhome_…>`（本面板发给客户端的媒体库 Id，见 getViews）→ `home.listByQuery` 跑对应插件行
  *   - 无 `ParentId` 的「推荐」查询（`SortBy` 含 `IsFavoriteOrLiked`）→ 路由到插件声明了 `feed` 的行
- *   - `Filters=IsFavorite / IsPlayed` → 没有任何用户数据，**如实回空**
+ *   - `Filters=IsPlayed` → 读 `playback` 表（**已看的条目，真数据**）；`Filters=IsFavorite` → 仍如实回空
  *   - 其余查询（含认不出的 `AnyProviderIdEquals`）→ **如实回空**
  *
  * **分页是协议的事，但 emby 层不做切片**：客户端给的 `StartIndex` / `Limit` **原样透传给模块**
@@ -662,9 +992,22 @@ async function getItems(requestedId, query) {
   const val = (key) => (query && typeof query.get === 'function' ? query.get(key) || '' : '');
   const empty = (log) => ({ status: 200, body: { Items: [], TotalRecordCount: 0 }, log });
 
-  /* 用户级状态（收藏 / 已播放）：本层没有任何数据，如实回空，不硬编 */
+  /* 用户级筛选：`IsPlayed` 现在**有真数据**（进度已落库）；`IsFavorite` 仍然没有
+   * （收藏需要写端点，没做）—— 两者分开处理，别一起回空。 */
   const filters = val('Filters');
-  if (/IsFavorite|IsPlayed/i.test(filters)) return empty(`Filters=${filters}（没有用户数据 → 空）`);
+  if (/IsFavorite/i.test(filters)) return empty(`Filters=${filters}（没有收藏数据 → 空）`);
+  if (/IsPlayed/i.test(filters)) {
+    const acc = resolveAccountById(requestedId);
+    if (!acc) return empty('Filters=IsPlayed（账号认不出 → 空）');
+    const want = val('IncludeItemTypes');
+    const rows = db.listPlayed(acc.id, limitOf(query, 50)).filter((r) => {
+      if (!want) return true;
+      const p = tmdb.parseItemId(r.item_id);
+      if (!p) return false;
+      return p.type === 'movie' ? /movie/i.test(want) : /episode|series/i.test(want);
+    });
+    return progressList(rows, acc.id, 'Filters=IsPlayed');
+  }
 
   /* ---- 按名字搜：`SearchTerm=…`（见 `searchTermOf` 那段）----
    * SenPlayer 的搜索框打的就是这条；早期落到"没有可识别的查询参数 → 空"。 */
@@ -2641,10 +2984,12 @@ module.exports = {
   getUser,
   getViews,
   getResume,
+  recordPlayback,
   getStudios,
   getNextUp,
   getItemCounts,
   itemsWillReturnData,
+  applyUserData,
   getItems,
   getLatest,
   getSeasons,

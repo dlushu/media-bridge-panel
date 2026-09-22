@@ -154,9 +154,11 @@ docker logs -t media-bridge-panel              # 带时间戳
 - 响应尽量贴 Emby 客户端的期望（字段名、大小写、分页参数），以客户端实测为准。
 - **回空的响应不校验账号**（既定口径）：**没有数据可保护，校验只会有坏处** ——
   客户端不带 token 时会白白收到一个 401，而它本该拿到一个空列表。所以校验只挂在**真会返回数据**的路上。
-  适用的有：`GET /Studios`、`Users/{UserId}/Items/Resume`、`Users/{UserId}/Items` 里 `Filters=IsFavorite/IsPlayed`
+  现在还适用的有：`GET /Studios`、`GET /Items/Counts`、`Users/{UserId}/Items` 里 `Filters=IsFavorite`
   与认不出的查询（判据收敛在 `service.itemsWillReturnData()` 一处，路由层与 `service.getItems` 共用）。
-  **真数据的端点照旧校验**（`Views` / `Items?ParentId=<本面板的库>` / 详情 / 季集 —— 无 token 一律 401）。
+  **真数据的端点永远校验**（`Views` / `Items?ParentId=<本面板的库>` / 详情 / 季集 / **观看进度那一族** ——
+  无 token 一律 401）。⚠️ `Items?Filters=IsPlayed` 自 [0023](adr/0023-playback-progress.md) 起**出真数据**，
+  因此它也从"不校验"挪进了"必须校验"。
 - ⚠️ **DTO 要给"完整形状"—— 客户端会因为缺字段而整条失败**（由 SenPlayer 实测发现，**这条代价最大**）：
   - **症状**：客户端拿到 `200` 之后**不再发任何后续请求**（正常时点开一条会紧跟一条 `Similar`），
     界面提示「网络错误 / 当前媒体库不存在该项目」。**它不是在抱怨某个字段为空，而是整条响应解不出来。**
@@ -196,10 +198,13 @@ docker logs -t media-bridge-panel              # 带时间戳
 | GET | `/api/emby/Users/{UserId}/Items/Latest` | 路径参数 `UserId`；`ParentId=<库Id>`；`Limit`（**缺省 20**，真机默认值）、`StartIndex`（有效）；`Fields`/`Recursive`/`MediaTypes`/`IsPlayed`/`EnableImageTypes`（忽略） | 200 **裸数组** `BaseItemDto[]`（**不是 `QueryResult`**，真机实测响应直接以 `[` 开头）：`ParentId` 是本面板的库 → **跑对应插件行**、顺序**由模块决定**（emby 层不排序、不筛"入库时间"）；`ParentId` 不是本面板的库（含不带）→ **空数组**；**插件行取数失败 → 照实回失败码**；AccessToken 同 `Items`（只挂在真会出数据的路上） | **VidHub 3.0.6 的整个首页都靠它**（实测拿到 `Views` 后逐库打，10 个库 = 10 次）；此前被详情路由吞掉 → 501 → 首页空白（其后接上） |
 | GET | `/api/emby/Shows/{Id}/Seasons` | 路径参数 `Id`（形如 `tmdb_95350_tv`）；**`UserId` 在 query 里**（同样校验）；`Fields`/`EnableTotalRecordCount=false`（忽略） | 200 `QueryResult<BaseItemDto>`：每季 `Id=tmdb_{id}_tv_s{n}`、`Type=Season`、`IndexNumber`(季号)、`SeriesId`/`SeriesName`、`ChildCount`(集数)；**特别篇（`season_number=0`）不返回**；非剧 Id → 404；UserId 不匹配 → 404；未设账号 → 401；TMDB 失败 → **照实回失败码** | 部署者指定（**占位**：TMDB 的 `seasons[]`，日志 emby#3 实测该端点） |
 | GET | `/api/emby/Shows/{Id}/Episodes` | 路径参数 `Id`（**剧 Id，或季 Id —— 见下条**）；**`UserId` 与 `SeasonId` 都在 query**；`EnableTotalRecordCount`/`Fields`（忽略） | 200 `QueryResult<BaseItemDto>`：每集 `Id=tmdb_{id}_tv_s{n}_e{m}`、`Type=Episode`、`IndexNumber`(集号)、`ParentIndexNumber`(季号)、`SeriesId`/`SeasonId`/`SeasonName`、`Primary` 图=剧照、`RunTimeTicks`(有 runtime 才填)；**季定不下来（没带/认不出/不属于本剧）→ 200 空**；路径 Id 非剧 → 404；UserId 不匹配 → 404；未设账号 → 401；TMDB 失败 → **照实回失败码** | 部署者指定（**占位**：TMDB season 接口，日志 emby#1 实测该端点） |
-| GET | `/api/emby/Users/{UserId}/Items/Resume` | 路径参数 `UserId`；`MediaTypes`/`Limit`/`Recursive`/`Fields`/`EnableImageTypes`（**全忽略**） | 200 **空** `QueryResult`：`{Items:[], TotalRecordCount:0}`（**如实**：没有任何观看记录 —— 没人写 `PlaybackPositionTicks`）；**不校验账号/UserId**（回空没有数据可保护，见下） | 部署者指定（**改成如实回空，不再 501**） |
+| GET | `/api/emby/Users/{UserId}/Items/Resume` | 路径参数 `UserId`；`Limit`（截断用，硬顶 100）；`MediaTypes`/`Recursive`/`Fields`/`EnableImageTypes`（忽略） | 200 `QueryResult<BaseItemDto>`：**该账号有位置、还没看完的条目**，最近看的在前（数据来自 `playback` 表，见 [ADR-0023](adr/0023-playback-progress.md)）；取不到元数据的行**不列出**（不编）；**无 token → 401**（回的是某个账号的观看记录） | 部署者指定（先是"如实回空"，后按 0023 换成真数据） |
+| POST | `/api/emby/Sessions/Playing` | body JSON：`ItemId`（**本面板发出去的 Id**）、`PositionTicks`、`RunTimeTicks`（可缺）、`PlaySessionId`/`MediaSourceId`/`PlayMethod`（忽略） | **204 空体**（真机实测同为 204）；**无 token → 401**；`ItemId` 认不出（不是本面板的 Id）→ 也回 204 但**不写库**，日志写明被忽略 | 客户端上报（实测 SenPlayer 6.2.1 开始播放时发 1 次） |
+| POST | `/api/emby/Sessions/Playing/Progress` | 同上（实测**每 10 秒一次**；`RunTimeTicks` 只有部分心跳带，缺了就用库里已有的顶住） | **204 空体**；其余同上 | 客户端上报（心跳；实测被 501 拒了也照发，所以必须收下） |
+| POST | `/api/emby/Sessions/Playing/Stopped` | 同上（**空 body 也接受**，当空操作） | **204 空体**；位置 ≥ 时长 90% 判为看完（`played=1`、位置归零、进「已看」） | 客户端上报（实测停止/退出时发 1 次） |
 | GET | `/api/emby/Users/{UserId}/Items/{ItemId}` | 路径参数 `ItemId`（面板发出去的 tmdb Id：`tmdb_{id}_{tv\|movie}[_s{n}][_e{m}]`）；`EnableImageTypes`/`Fields`（忽略） | 200 **单个 `BaseItemDto` 本体**（不包 `QueryResult`）：TMDB 元数据 + `ProviderIds.Catpaw="<站点key>\|<vod_id>"` + `CatpawSource{Lines, Target}` + **集才有 `MediaSources`（线路=版本，`Id` = `catpaw:` + base64url(JSON `{s,t,f,v}`)，`Path` 留到 PlaybackInfo 现取）**；**聚合取数失败只降级不回失败**（元数据照常 200）；Id 认不出 → **501**（如 `Items/ResumeXyz`）；TMDB 失败 → 照实回失败码；UserId 不匹配 → 404；未设账号 → 401 | 部署者指定（**元数据 TMDB + 线路/绑定走设置里的聚合地址**） |
 | GET | `/api/emby/Studios` | 无路径参数；query `UserId`/`Limit`/`StartIndex`/`SearchTerm`/`Fields`（**全忽略**） | 200 **空** `QueryResult`：`{Items:[], TotalRecordCount:0}`（**如实**：服务端没有片库可枚举，详见「五」下面那条）；**不校验账号/UserId**（回空没有数据可保护） | 部署者指定（**回空，不是 501**） |
-| GET | `/api/emby/Shows/NextUp` | `UserId`（在 **query**，不在路径）、`Limit`/`MediaTypes`/`Recursive`/`Fields`/`EnableImageTypes`（**全忽略**） | 200 **空** `QueryResult`（**如实**：与 `Items/Resume` 同一族，都要观看历史）；**不校验账号** | 部署者指定（SenPlayer 实测在要） |
+| GET | `/api/emby/Shows/NextUp` | `UserId`（在 **query**）、`SeriesId`（可选 —— SenPlayer 实测会带，只问某一部剧）、`Limit`（截断用）；`MediaTypes`/`Recursive`/`Fields`/`EnableImageTypes`（忽略） | 200 `QueryResult<BaseItemDto>`：该剧最近观看的那一集**未看完就回它自己**，**看完则回下一集**（同一季内找得到才回，找不到再试下一季第 1 集；都不存在就跳过这部剧）；**无 token → 401** | 部署者指定（SenPlayer 实测在要；按 0023 从"如实回空"换成真数据） |
 | GET | `/api/emby/Items/Counts` | 全部忽略（含 `ParentId`） | 200 **`ItemCounts` 全 0**（14 个字段：`MovieCount`/`SeriesCount`/`EpisodeCount`/`GameCount`/`ArtistCount`/`ProgramCount`/`GameSystemCount`/`TrailerCount`/`SongCount`/`AlbumCount`/`MusicVideoCount`/`BoxSetCount`/`BookCount`/`ItemCount`）；**不校验账号**。**全 0 = "数不出来"，不是"库是空的"** —— 详见「五」下面那条 | 部署者指定（SenPlayer 实测在要） |
 | POST | `/api/emby/Items/{ItemId}/PlaybackInfo` | 路径参数 `ItemId`（**必须是集或电影**）；`UserId` 在 query（可缺） | 200 `{MediaSources:[…], PlaySessionId}`：每条线路一个版本，`Id` = `catpaw:` + base64url(JSON `{s,t,f,v}`)（客户端播直连时回传的 `MediaSourceId` 就是它 —— **vod 编在里面**，拉流那一格才不用回头再搜一次；**为什么必须编码**见下面「线路 + 源绑定」那条，一句话：线路名里的 `#` 会被 URL 当锚点吃掉）、**`Path` 指向本面板的 Stream 端点**（稳定坐标，不含时效 token；实测客户端**不读它**，走 `videos/{Id}/stream.{ext}`）、`RequiredHttpHeaders:{}`、**`Container`/`Size`/`RunTimeTicks`/`MediaStreams`（编码/分辨率/HDR，来自源在集名里的标注）**；Id 不是集 → 404；TMDB / 聚合失败 → 照实回 | 部署者指定（客户端点播放前必来） |
 | GET | `/api/emby/Items/{ItemId}/Stream` | 两种形状：**① `Path` 用的** `/Stream/{token}[/{文件名}]`（`token` = base64url 的版本 Id，自带站点/线路/vod；末段文件名只为版本行副标题）；**② 手工调试** `?src=<版本 Id>`（新的 base64url，或旧版明文 `catpaw:<站点>:<线路>[\|<vod>]`，`parseCatpawSourceId()` 两种都拆）、`vod` 可缺（src 里自带就用自带的）。两种都可带 `UserId`（可选，**有就校验**） | **一律 302**（"面板代为转发"那条路已删，见下面「拉流」一节）；`src` 认不出 → 400、两个来源都没有 vod → 400；Id 非集 / 定位不到这一集 → 404；聚合或 play 失败 → 502（照搬上游码）；`push://` 之类非直连 → 501 | 部署者指定（拉流最后一格；**实测客户端走的是下一行那条**，这条留作备用/调试） |
@@ -273,7 +278,7 @@ docker logs -t media-bridge-panel              # 带时间戳
   0. **`SearchTerm=<词>` → 按名字搜**（见下面「搜索」那条）—— 排在前面因为它最具体
   1. `ParentId=<catpawhome_…>` → `home.listByQuery()` 跑对应插件行 → `HomeItem` → `BaseItemDto`；**`StartIndex`/`Limit` 原样透传给模块**（进 `ctx.startIndex`/`ctx.limit`，**emby 层不切片** —— 取哪一页是模块的决定），`SortBy`/`Recursive`/`IncludeItemTypes` 忽略；`TotalRecordCount` 用**模块给的 `total`**
   2. **「推荐」查询**（无 `ParentId` + 无 `Filters` + `SortBy` 含 `IsFavoriteOrLiked`）→ 路由到**插件声明了 `feed: 'random'` 的那一行**（见下面「推荐查询」那条）
-  3. `Filters=IsFavorite / IsPlayed` → 空（没有任何用户数据，**如实**）
+  3. `Filters=IsPlayed` → **读 `playback` 表**出已看的条目（真数据，要 token）；`Filters=IsFavorite` → 空（没有收藏数据，**如实**）
   3.5 `AnyProviderIdEquals=tmdb.{id}` → **按外部 id 搜一条**（见下面那条）—— 与「搜索」同类：**检索归 emby 层**，不归首页模块
   4. 其余查询（含认不出的 `AnyProviderIdEquals`）→ 空
   - **搜索（`SearchTerm=<词>`）**：**按名字搜**，数据来自 TMDB 的 `search/tv` 与 `search/movie`。
@@ -313,7 +318,8 @@ docker logs -t media-bridge-panel              # 带时间戳
   - **顺带修了一处回归**：`Items/{ItemId}` 详情原本靠「复用列表实现挑那一条」拿电影/剧的元数据，列表改口径后它会 404 —— 现在改成**直接 `tmdbItemDto()` 反查**（季/集仍复用 `getSeasons`/`getEpisodes`）。**"点进去 → TMDB 反查"这一环不能断**。
   - 条目 Id 由插件给出，**建议**（非强制）是 `tmdb_{id}_{tv|movie}` —— 点进去要靠这个坐标反查（见插件指南「五」）；插件给了别的 Id 也能显示，只是点进去没有资源，**emby 层不兜底**。
   - **条目给 `ImageTags`**：图片端点已实现，所以列表/详情都照给；tag 是**签名 tag**（见下面「图片」那条）。
-  - `Filters=IsFavorite` / `Filters=IsPlayed` 直接回空：没有用户级数据（见「六、明确无视的请求」），空是**如实**，不是留白。
+  - `Filters=IsFavorite` 直接回空：没有收藏数据（见「六、明确无视的请求」），空是**如实**，不是留白；
+    `Filters=IsPlayed` 读 `playback` 表出**已看条目**（见 [0023](adr/0023-playback-progress.md)），因此**要 token**。
   - 响应形状就是 Emby 的 `QueryResult<BaseItemDto>`：`{Items, TotalRecordCount}`。官方定义只有这两个字段（已核实）。
   - `Id` 由 tmdb 坐标派生：`tmdb_{id}_tv` / `tmdb_{id}_movie`（带类型是因为 TMDB 里 tv 95350 与 movie 95350 是两条数据）。**不含源信息** —— 客户端把它当主键缓存，掺进"哪个站点、哪次搜索"就会因为源变动而变 Id，客户端缓存的「已看」会全丢。
   - `ImageTags` / `BackdropImageTags` 的 tag 是**签名 tag**，内容就是"这张图的完整 URL"，见下面「图片」那条。
@@ -588,24 +594,27 @@ docker logs -t media-bridge-panel              # 带时间戳
     给了 Id 就等于承诺"点公司能进列表"，而 `/Studios/{Name}/Items` 没实现（会 501）——
     但这条**只能这样**：**完整性优先**，宁可点了 501，也不能让整页打不开。
   - **不校验账号**（既定口径）：**回空的响应没有数据可保护**，校验只会有坏处 ——
-    客户端不带 token 时会白白收到一个 401，而它本该拿到一个空列表。同口径的还有 `Items/Resume`
+    客户端不带 token 时会白白收到一个 401，而它本该拿到一个空列表。同口径的还有 `Items/Counts`
     与 `Items` 里那些回空的分支（判据收敛在 `service.itemsWillReturnData()` 一处，
     路由层与 `service.getItems` 共用，不会漂移）。
     实测：不带 token 取 `Studios` → **200 空**（改之前是 401）。
-- **「如实回空」这一家子**：`Studios` / `Items/Resume` / `Shows/NextUp` / `Items/Counts`，
-  以及 `Items` 里 `Filters=IsFavorite/IsPlayed` 与认不出的查询。共同点：**确实没有那份数据**，
-  所以回空（回全 0 的那种也叫回空）；且**一律不校验账号**（回空没有数据可保护）。
+- **「如实回空」这一家子**：`Studios` / `Items/Counts`，以及 `Items` 里 `Filters=IsFavorite`
+  与认不出的查询。共同点：**确实没有那份数据**，所以回空（回全 0 的那种也叫回空）；
+  且**一律不校验账号**（回空没有数据可保护）。
   | 端点 | 为什么是空的 | 缺的是什么 |
   |---|---|---|
   | `Studios` | 没有片库可枚举 | 片库索引 |
-  | `Items/Resume` / `Shows/NextUp` | 没有观看历史（没人写 `PlaybackPositionTicks`） | 用户数据 |
   | `Items/Counts` | 数不出来 | 片库索引 |
+  | `Items?Filters=IsFavorite` | 收藏要有写端点（没做） | 收藏功能 |
+  - **`Items/Resume` / `Shows/NextUp` 已不在这一家**：自 [0023](adr/0023-playback-progress.md) 起它们读
+    `playback` 表出真数据，也**因此改成要 token**（回的是某个账号的观看记录）。
   - ⚠️ **`Items/Counts` 的全 0 要说清**：意思是**"数不出来"**，**不是"库是空的"**。
     `ItemCounts` 的 14 个字段都是数字、没有"未知"这种取值，所以只能填 0。
     那为什么不去凑？唯一的数据源是各插件行返回的 `total`（如 `top_rated` 报 `11216`）——
     那是 **TMDB 榜单的总数，不是库里的数量**，拿它当"库里有 11216 部片"就是**编数据**，比 0 更差。
-  - `Shows/NextUp` 与 `Items/Resume` 的分工（都靠观看历史，所以两条都是空的）：
-    `Resume` = 有播放进度的条目；`NextUp` = 正在追的剧里**下一集**该看哪一集。
+  - `Shows/NextUp` 与 `Items/Resume` 的分工（都靠观看历史，见 [0023](adr/0023-playback-progress.md)）：
+    `Resume` = **有播放进度、还没看完**的条目；`NextUp` = 正在追的剧里**下一集**该看哪一集
+    （最近看的那集没看完 → 回它自己；看完 → 回下一集，且必须在 TMDB 季数据里真实存在）。
   - 路由形状提醒：这两条都**没有**同名冲突（没有裸的 `Shows/:showId`、条目详情那条是
     `Users/:userId/Items/:itemId` 而不是 `Items/:itemId`）。但 `Items/Resume` 与 `Items/Latest`
     **都**被同形状路由吞过一次（后者曾导致 VidHub 首页全空）——
@@ -799,11 +808,12 @@ TMDB 流量分**两类**，走的路完全不同 —— 混在一起算账一定
 | 方法 | 路径 | 识别特征 | 决定 |
 |---|---|---|---|
 | GET | `/api/emby/Users/{UserId}/Items` | query 带 `Filters=IsFavorite`（首页「收藏」） | **无视** —— 不补 |
-| GET | `/api/emby/Users/{UserId}/Items` | query 带 `Filters=IsPlayed`（已播放列表） | **无视** —— 不补 |
 
-- 判定只看 query 里的 `Filters=` 值命中 `IsFavorite` / `IsPlayed` 即算，其余参数（`SortBy`、`Limit`、`Fields`、`Recursive`…）怎么变都无视。
-- **不是整体无视 `Users/{UserId}/Items`**：`Filters=IsFavorite/IsPlayed` 两条如实回空（没有用户数据，空是如实）；`ParentId=<本面板的库Id>` 走首页模块（见「五」）；**`AnyProviderIdEquals=tmdb.{id}` 归 emby 层**（按外部 id 搜一条 —— 删过、后恢复，理由见「五」）。
-- 实现后的行为：`Users/{UserId}/Items` 现在会正常收下这两类请求并**回空 `QueryResult`** —— 没有用户级数据，空是如实；不会再落到 501 通配里。
+- 判定只看 query 里的 `Filters=` 值命中 `IsFavorite` 即算，其余参数（`SortBy`、`Limit`、`Fields`、`Recursive`…）怎么变都无视。
+- **`Filters=IsPlayed` 已从这张表移出**：自 [0023](adr/0023-playback-progress.md) 起它**出真数据**
+  （读 `playback` 表的已看条目），不再回空。
+- **不是整体无视 `Users/{UserId}/Items`**：`Filters=IsFavorite` 如实回空（没有收藏数据，空是如实）；`Filters=IsPlayed` 读库出真数据；`ParentId=<本面板的库Id>` 走首页模块（见「五」）；**`AnyProviderIdEquals=tmdb.{id}` 归 emby 层**（按外部 id 搜一条 —— 删过、后恢复，理由见「五」）。
+- 实现后的行为：`Users/{UserId}/Items` 会正常收下这些请求，不会再落到 501 通配里。
 
 > **字段级**的"故意不给"记在别处（不是端点级，所以不列上面的表）：详情页哪些字段不给、为什么不给 —— 见「五」的**详情页"丰富度"**那条（`OriginalLanguage` / `CriticRating` / `ScreenshotImageTags` / 合集 Boxset）。
 > 原来那份清单里还有"**演员头像**"和"**演职人员不给 `Id`**"两条，**已推翻**（缺 `Id` 会让客户端整条响应解码失败），改成了"给 Id + 头像顺带做通"，理由见同一条。
@@ -816,7 +826,7 @@ TMDB 流量分**两类**，走的路完全不同 —— 混在一起算账一定
 
 | 方法 | 路径 | 用途 | 现状 |
 |---|---|---|---|
-| GET | `/api/emby/Users/{UserId}/Items/Resume` | ~~首页「继续观看」~~ | **已实现**（**如实回空** —— 没有观看记录，见「五」） |
+| GET | `/api/emby/Users/{UserId}/Items/Resume` | ~~首页「继续观看」~~ | **已实现**（**真数据** —— 读 `playback` 表的未看完条目，见「五」与 [0023](adr/0023-playback-progress.md)） |
 | GET | `/api/emby/Studios` | ~~工作室筛选列表~~ | **已实现**（**如实回空** —— 没有片库可枚举，见「五」） |
 | GET | `/api/emby/Items/{Id}/Images/{type}` | ~~图片~~ | **已实现**（见「五」；tag 验签通过 **或** 命中本地图片索引都出图，否则 404；端点豁免 token） |
 | GET | `/api/emby/Users/{UserId}/Items/Latest` | ~~官方另一条「每库最新」路径（回裸数组，与 `QueryResult` 形状不同）~~ | **已实现**（见「五」；**VidHub 3.0.6 的整个首页都靠它** —— 实测拿到 `Views` 后逐库各打一次） |
@@ -824,15 +834,19 @@ TMDB 流量分**两类**，走的路完全不同 —— 混在一起算账一定
 | GET | `/api/emby/Users/{UserId}/Items/{库Id}` | 客户端问「这个库是什么」（形状与 `Items/{ItemId}` 相同，现在会被 `parseItemId` 判成 501） | **未指定**（客户端尚未请求） |
 | GET | `/api/emby/System/Info` | **带 token 的完整服务器信息**（`System/Info/Public` 的加强版：编码器位置、各类路径、能否自更新/自重启等 —— 大部分是**本项目没有的能力**） | **未指定**（VidHub 3.0.6 登录后要它，现在落到 501 通配；**它容忍了**、照常往下走） |
 | GET | `/api/emby/Shows/{Id}/Seasons` | **特别篇（TMDB `season_number=0`）是否返回** | **待定**（客户端可能支持显示特别篇，暂不确定；现在按"不返回"实现，见「五」） |
-| GET | `/api/emby/Shows/NextUp` | ~~SenPlayer 的「接下来看」~~ | **已实现**（**如实回空** —— 与 `Resume` 同一族，见「五」） |
+| GET | `/api/emby/Shows/NextUp` | ~~SenPlayer 的「接下来看」~~ | **已实现**（**真数据** —— 按库里进度算下一集，见「五」与 [0023](adr/0023-playback-progress.md)） |
+| POST | `/api/emby/Sessions/Playing` | ~~客户端上报「开始播放」~~ | **已实现**（落库；实测 SenPlayer 6.2.1 每次播放发 1 次） |
+| POST | `/api/emby/Sessions/Playing/Progress` | ~~播放中的心跳（实测每 10 秒一次）~~ | **已实现**（落库；被 501 拒了客户端也照发，所以必须收下） |
+| POST | `/api/emby/Sessions/Playing/Stopped` | ~~停止 / 退出上报~~ | **已实现**（落库；位置 ≥ 时长 90% 判为看完） |
 | GET | `/api/emby/Items/Counts` | ~~侧边栏每个库的条目数~~ | **已实现**（**全 0** —— 数不出来，不是库空，见「五」） |
 | GET | `/api/emby/System/Ext/ServerDomains` | **不是 Emby 核心端点** —— 第三方插件 `uhdnow/emby_ext_domains` 提供的「服务器地址清单」（`{data:[{name,url}],ok}`，用于内网/外网/备用域名切换）。真 Emby 没装那插件也是 404 | **不实现**（不在 Emby 协议里；接了反而像冒充那个插件。客户端本就该容忍它不存在） |
 
 > **这张表里"没实现"的只剩三条**：`Items/{库Id}`（库详情，客户端尚未请求）、`System/Info`（带 token 的完整版，
 > VidHub 在要）、`System/Ext/ServerDomains`（判定**不实现** —— 不是 Emby 核心端点，是第三方插件提供的，接了像冒充它）。
 > 其余各行**都已实现**（`Resume` / `Studios` / 图片 / `Items/Latest` / `NextUp` / `Items/Counts` / `Views` /
-> `Items?ParentId=`），其中 `Resume` / `Studios` / `NextUp` / `Counts` 是**如实回空** —— 没有那份数据，
-> 空是如实，不是没做。
+> `Items?ParentId=` / 三条进度上报），其中 `Studios` / `Counts` 是**如实回空** —— 没有那份数据，空是如实；
+> `Resume` / `NextUp` / `Items?Filters=IsPlayed` 自 [0023](adr/0023-playback-progress.md) 起出**真数据**
+> （数据来自客户端上报的播放进度）。
 > **还没做的端点级缺口**（`GenreItems` 的列表端点、`Sessions/Logout`、`/Users/Public`、用户级 `Similar`）
 > 记录在 [develop.md](develop.md) 的「未实现」一节。
 

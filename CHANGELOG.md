@@ -5,6 +5,19 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **播放进度：客户端上报落库，「继续观看 / 接下来看 / 已看」出真数据**。
+  `POST /Sessions/Playing`、`/Sessions/Playing/Progress`（实测每 10 秒一次心跳）、`/Sessions/Playing/Stopped`
+  三条从 501 通配改为真正收下（一律 **204** 空体，与真机一致），落进 `data/emby/emby.db` 的新表 `playback`
+  （一行 = 一个账号 + 一条片，覆盖写；关联键是账号，不是会变的 `user_id`）。
+  随之变成真数据的读端点：`Items/Resume`（有位置、未看完，最近在前）、`Shows/NextUp`（看完这一集给下一集，
+  下一集必须在 TMDB 季数据里真实存在）、`Items?Filters=IsPlayed`，以及列表 / 详情 / 季 / 集 / 最新 / 相似
+  这些端点里每个条目的 `UserData`。**这三条读端点现在都要 token**（回的是某个账号的观看记录）。
+  "看完"按位置 ≥ 时长 90% 判定（客户端不报 `Played`），判为看完时位置归零、进「已看」。
+  决策见 [ADR-0023](docs/adr/0023-playback-progress.md)，真机实测与取舍见
+  [docs/playback-progress.md](docs/playback-progress.md)。
+
 ### 变更
 
 - **「聚合详情」缓存的字节上限改成可调**（「面板设置 → 缓存设置」→「聚合详情上限 MB」，默认 32MB，填 `0` = 不限）。
@@ -13,6 +26,17 @@
   与元数据 / 图片索引同一套口径：上限调小后**保存设置时立刻按新上限淘汰**，不用等下次写入。
 - **检查到更新时直接显示更新内容**：「面板设置 → 版本与更新」在"有新版本"时会把该版本的更新说明一并列出来
   （内容取自 Release 说明，也就是 CHANGELOG 里那一节），并给出 Release 页面链接；该版本没写说明时如实说一句。
+- **未实现端点的日志带上请求体摘要**（掩码 + 压平 + 限长 300 字符）：通配路由此前把 POST 的 body
+  读完即丢，导致「客户端到底报了什么」完全看不见（播放进度的 `POST /Sessions/Playing*` 三条就是这样，
+  日志里只剩一个路径名）。现在键名像 `api_key` / `token` / `password` 的值一律记 `***`，
+  嵌套结构与数组只报形状，避免把凭据或几 KB 的播放队列写进日志。
+
+### 修复
+
+- **条目上看不到进度条**：观看进度原先只给了 `UserData.PlaybackPositionTicks`，而客户端画进度条要的是
+  `UserData.PlayedPercentage` 与**条目级 `RunTimeTicks`** —— 对比真机发现真机两条都给、本层一条都没有
+  （电影条目本来就不带时长）。现在有位置的条目会带上 `PlayedPercentage`（小数百分比，位置为 0 时不给，
+  与真机一致）、客户端上报的时长，以及 `LastPlayedDate`。
 
 ## [1.2.0] - 2026-09-23
 
