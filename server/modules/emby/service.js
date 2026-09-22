@@ -1388,6 +1388,23 @@ async function getItem(itemId, requestedId, host = '') {
 
   if (!found) return { status: 404, body: { error: '没有这个条目' }, log: `列表里没有 ${itemId} → 404` };
 
+  /* ---- 不可播类型（剧 / 季）：TMDB 元数据照给，**源那一趟不跑** ----
+   * Emby 里「剧」「季」是**容器**（真机就是 `IsFolder:true / CanPlay:false`），版本清单
+   * （MediaSources）的语义是"这里有 N 个能直接播的文件"，给了客户端会以为整部剧是一个文件、
+   * 给出播放入口 —— 而源里每条线路对应的是一集一个文件，点了必然播不出来。
+   * 所以按设计**不给版本列表**（下面的 `if (!isPlayable(...)) continue` 就是这条规矩）。
+   *
+   * 从前是"先把源整趟跑完（4~7 秒）、算出线路与定位，**然后**才判类型、再全丢掉"——
+   * 现在把判断提到问聚合层**之前**：结果一模一样（`sources` 为空时下面那些条目级字段
+   * 本来也不会被填），只是不再白跑那一趟。实测剧集详情 5~6 秒 → 几十毫秒。 */
+  if (!isPlayable(found.Type)) {
+    return {
+      status: 200,
+      body: found,
+      log: `id=${itemId}「${name}」→ 非可播类型「${found.Type}」，按设计不给版本列表（没查源站）`,
+    };
+  }
+
   /* ---- ② 线路 + 源绑定：把影视名交给聚合层，一次拿回线路与「这一集」的定位 ---- */
   /* 电影没有季集号：借聚合层的「第 1 季按选集序号」规则取**第一条播放项**（站源里电影就是一项，
    * 即正片）—— 见 `wantLocator()` 那段说明。
@@ -1467,6 +1484,9 @@ async function getItem(itemId, requestedId, host = '') {
       if (det.targetNote) dg.TargetNote = det.targetNote;
       detailDigests.push(dg);
 
+      /* **兜底**：不可播类型（剧/季）不进版本列表。正常走不到这里 ——
+       * 函数开头那个「拿到 TMDB 元数据后先判类型」的早返回已经把剧/季挡在聚合层之前了
+       * （见 `getItem` 里那段说明）；留着是给以后新增类型时的保险。 */
       if (!isPlayable(found.Type)) continue;
       for (const line of lines) {
         /* 线路过滤（`play.filter`）：**只匹配线路名**，不匹配的不进版本列表。
@@ -1573,7 +1593,7 @@ async function getItem(itemId, requestedId, host = '') {
   const noTargetNote = noTarget ? `（另有 ${noTarget} 条没定位到 ${locatorLabel(found.Type, p)}，不进版本列表）` : '';
   const filterNote =
     !isPlayable(found.Type)
-      ? ` 非可播类型「${found.Type}」，按设计不给版本列表（源里 ${totalLines} 条线路）`
+      ? ` 非可播类型「${found.Type}」，按设计不给版本列表（源里 ${totalLines} 条线路）` /* 兜底：早返回之后正常走不到 */
       : (filter.raw
           ? ` 线路过滤(/${filter.raw}/)${filter.invalid ? '规则非法，已忽略' : ''}：源里 ${totalLines} 条 → 过滤后 ${afterFilter} 条` +
             (filter.re && totalLines > 0 && afterFilter === 0 ? '（规则把线路全滤掉了）' : '')

@@ -6,7 +6,7 @@
  * TMDB 元数据缓存与「名字 → 搜索结果」索引要被 emby **和**聚合层共用，
  * 而依赖是单向的 `emby → agg → core` —— agg 不能去读 emby 的东西。
  * 所以「开库 / TTL / 按字节 LRU 淘汰 / 统计 / 清空」这套通用能力放在 core，
- * 各有各策略的调用方（`core/tmdb.js` 与 `modules/emby/cache.js`）各自建一个 store。
+ * 各有各策略的调用方（`core/tmdb.js`、`modules/emby/cache.js`、`modules/agg/cache.js`）各自建一个 store。
  *
  * —— 淘汰策略：TTL + 字节上限 + LRU，三者各管一件事 ——
  *   · TTL（按时间）管**正确性** —— 元数据会变（评分、简介、海报更换）
@@ -41,7 +41,27 @@ const NAME_TTL_MS = 6 * 60 * 60 * 1000;
 const NAME_MAX_BYTES = 2 * 1024 * 1024;
 
 /** 面板可改的默认值（「面板设置 → 缓存设置」）。**只有这一处**，core/tmdb.js 与 emby/cache.js 都从这里取 */
-const DEFAULTS = { tmdbTtlDays: 30, tmdbMaxMB: 200, imageTtlDays: 90, imageMaxMB: 5 };
+const DEFAULTS = {
+  tmdbTtlDays: 30,
+  tmdbMaxMB: 200,
+  imageTtlDays: 90,
+  imageMaxMB: 5,
+  /** 聚合详情缓存（`detail_cache`，见 agg/cache.js）：**按分钟**，因为它是秒级~分钟级的短缓存。
+   *  0 = 不缓存（与上面「天数 0 = 不缓存」同一口径）；勾了「长期有效」时这个数不看。 */
+  detailTtlMinutes: 60,
+  detailNeverExpire: false,
+};
+
+/**
+ * 「长期有效」用的 TTL：写 `expires_at = now + 这个数`（约 100 年）。
+ * 不写 0/Infinity —— `enforce()` 判的是 `expires_at <= now`，0 等于"写完即过期"，
+ * 而 Infinity 落库会变成 NULL/精度问题，所以给一个够远的有限值。
+ */
+const NEVER_TTL_MS = 100 * 365 * 86400000;
+
+/** 聚合详情缓存的总字节上限（**写死不暴露**，照 name_index 的先例）。
+ *  一条详情含全站的线路与选集，实测几十~几百 KB，32MB 够放上百部片。 */
+const DETAIL_MAX_BYTES = 32 * 1024 * 1024;
 
 /**
  * 当前缓存策略（毫秒/字节），读**面板设置**的 `cache.*`（由 emby 设置迁入：
@@ -51,11 +71,15 @@ const DEFAULTS = { tmdbTtlDays: 30, tmdbMaxMB: 200, imageTtlDays: 90, imageMaxMB
 function cfg() {
   const c = (settings.read('panel') || {}).cache || {};
   const num = (v, d) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : d);
+  const detailMinutes = num(c.detailTtlMinutes, DEFAULTS.detailTtlMinutes);
   return {
     tmdbTtlMs: num(c.tmdbTtlDays, DEFAULTS.tmdbTtlDays) * 86400000,
     tmdbMaxBytes: num(c.tmdbMaxMB, DEFAULTS.tmdbMaxMB) * 1024 * 1024,
     imageTtlMs: num(c.imageTtlDays, DEFAULTS.imageTtlDays) * 86400000,
     imageMaxBytes: num(c.imageMaxMB, DEFAULTS.imageMaxMB) * 1024 * 1024,
+    /* 「长期有效」勾了就无视分钟数（`detailNeverExpire` 是布尔，不是数字） */
+    detailTtlMs: c.detailNeverExpire ? NEVER_TTL_MS : detailMinutes * 60000,
+    detailMaxBytes: DETAIL_MAX_BYTES,
   };
 }
 
@@ -64,6 +88,7 @@ const TABLE_CAP = {
   tmdb_cache: (c) => c.tmdbMaxBytes,
   image_index: (c) => c.imageMaxBytes,
   name_index: () => NAME_MAX_BYTES,
+  detail_cache: (c) => c.detailMaxBytes,
 };
 
 /** 已建的 store（label → store）：面板的「用量 / 清空 / 设置变更后扫一遍」靠它一把抓 */
@@ -251,6 +276,8 @@ module.exports = {
   USED_REFRESH_MS,
   NAME_TTL_MS,
   NAME_MAX_BYTES,
+  NEVER_TTL_MS,
+  DETAIL_MAX_BYTES,
   DEFAULTS,
   cfg,
   createStore,

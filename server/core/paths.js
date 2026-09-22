@@ -23,6 +23,9 @@ module.exports = {
   CACHE_DIR: path.join(DATA_DIR, 'cache'),
   /** TMDB 缓存库：`tmdb_cache`（元数据响应）+ `name_index`（名字 → 搜索结果，agg 与 emby 共用） */
   TMDB_CACHE_DB: path.join(DATA_DIR, 'cache', 'tmdb.db'),
+  /** 聚合详情缓存库：`detail_cache`（影视名 + 季集 → 线路与定位结果，见 agg/cache.js）。
+   * 也放共享缓存目录：读它的有聚合层（web 取详情）与 emby 层（条目详情 / 播放信息）。 */
+  DETAIL_CACHE_DB: path.join(DATA_DIR, 'cache', 'detail.db'),
   /** emby 模块自己的库（客户端登录账号等；含密码哈希，不要提交/外发） */
   EMBY_DIR: path.join(DATA_DIR, 'emby'),
   EMBY_DB: path.join(DATA_DIR, 'emby', 'emby.db'),

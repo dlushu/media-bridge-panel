@@ -27,7 +27,8 @@
 const settings = require('../../core/settings');
 const catpaw = require('../../core/catpaw');
 const sourceService = require('../source/service');
-const { aggregateSearch, aggregateDetail, playEpisode, selectSites } = require('./service');
+const cache = require('./cache');
+const { aggregateSearch, aggregateDetail, playEpisode, selectSites, matchDefaults } = require('./service');
 
 /** 失败的统一形状（不抛异常：调用方可能是路由，也可能是 emby 层，各自决定怎么呈现） */
 function fail(code, status, message) {
@@ -128,6 +129,61 @@ function lineFilter() {
   }
 }
 
+/* ============================================================
+ * 详情快照 + 同键并发合并（表与库见 modules/agg/cache.js）
+ *
+ * 客户端点一次「播放」会连着问三遍同一件事（条目详情 → 播放信息① → 播放信息②），
+ * 每遍都要「搜源 → 逐站取详情 → 定位到这一集」，实测 4~7 秒 —— 三次串行 ≈ 20 秒，
+ * 其中两遍是白重算的。这里把那一步的结果存下来复用。
+ * ============================================================ */
+
+/** 正在跑的详情查询：同一个 key 的并发请求跟着同一趟走，不各打一次源站 */
+const inflightDetail = new Map();
+
+/**
+ * 快照 key = 「问的是什么」+「当时按什么规则问」。
+ *
+ * 把**规则**（参与站点、源地址、分数线、最多留几条、补打设置、站点顺序）一起拼进去，
+ * 是为了让「改了设置」这件事**天然换 key** —— 不必再写一套"设置变更后清缓存"的钩子，
+ * 也不会读到按旧规则算出来的结论。
+ *
+ * ⚠️ **线路过滤不进 key**：过滤是在 emby 层拿到结果之后做的（聚合结果本身不带过滤），
+ * 所以改过滤规则立刻生效，与快照无关。
+ */
+function detailCacheKey({ name, year, season, episode, scoped, sources, cfg, opts }) {
+  const m = matchDefaults(opts);
+  const extraAll = opts.extraAll === undefined ? !!cfg.matchExtraAll : !!opts.extraAll;
+  const pair = (x) => `${(x && x.source) || ''}/${(x && x.key) || ''}`;
+  const dim = (v) => (v === undefined || v === null || v === '' ? '' : String(v));
+  return [
+    'aggdetail',
+    String(name || ''),
+    String(year || ''),
+    dim(season),
+    dim(episode),
+    /* 参与站点（顺序无关 → 排序）+ 源地址（改了地址等于换了后端，旧快照不能再用） */
+    scoped.map(pair).sort().join(','),
+    (sources || []).map((s) => `${s.id}|${s.url || ''}`).sort().join(';'),
+    /* 这几项直接决定"命中哪些站"，必须进 key */
+    [m.minScore, m.maxItems, m.extraK, extraAll ? 1 : 0, (cfg.order || []).map(pair).join(',')].join('|'),
+  ].join('\u0001');
+}
+
+/**
+ * 什么样的结果才值得存快照 —— 两条都遵循「宁可下次再打一趟源，也不给旧结论」：
+ *
+ *   ① **有站失败就不存**：一次网络抖动会被存住，之后整个 TTL 内每次点开都少那几条线路，
+ *      而且日志上看不出来（结果长得和"源里就是没有"一样）。
+ *   ② **负结果不存**：`detailOk === 0` 表示"没命中"或"全失败"，这两件事在返回值上不好区分 ——
+ *      分不清就不缓存，每次如实去问。
+ */
+function cacheableDetail(out) {
+  const s = out.stats || {};
+  if (!(s.detailOk > 0)) return false;
+  if ((s.detailFailed || 0) > 0) return false;
+  return !(out.sites || []).some((x) => x && x.ok === false);
+}
+
 /**
  * 取影视详情（**内部含搜索**）。
  *
@@ -138,7 +194,8 @@ function lineFilter() {
  * **没有 `all`**：命中的站一律全取（见 service.aggregateDetail），
  * 但条数受 `maxItems` 限制（每多一条命中就要多打一次 `/detail` 取链，太慢）。
  * ⚠️ **不再有 TMDB 反查**：判据是 `match.js` 的打分（理由见那个文件顶部）。
- * 成功回 `{ok:true, sites, picked, stats, sources, elapsedMs}`（每站的成败在 `sites[].ok/error` 里）。
+ * 成功回 `{ok:true, sites, picked, stats, sources, elapsedMs}`（每站的成败在 `sites[].ok/error` 里）；
+ * 走快照时多一个 `cached:true`，`elapsedMs` 是**当初算它那一次的耗时**。
  */
 async function detail(opts = {}) {
   const name = String(opts.name || '').trim();
@@ -166,38 +223,88 @@ async function detail(opts = {}) {
     );
   }
 
-  const out = await aggregateDetail(sources, scoped, {
-    name,
-    year: opts.year,
-    source,
-    site,
-    vodId,
-    season: opts.season,
-    episode: opts.episode,
-    timeoutMs: opts.timeoutMs,
-    minScore: opts.minScore,
-    maxItems: opts.maxItems,
-    /* 接续补打（不传读设置）：前 N 条没凑够时最多再多试几条（`matchExtraK`）；
-     * `extraAll` = 匹配到底（不看 K，一直往下打到凑够或名单打完） */
-    extraK: opts.extraK,
-    extraAll: opts.extraAll,
-  });
-  out.sources = sources;
-  /* 打分的"一句话摘要"进日志：命中几条、扫了多少条、没进的都因为什么。
-   * 没命中时这行就是唯一线索 —— 所以把各桶计数都写出来（web 上那三个输入框怎么调，看它）。 */
-  const m = out.stats && out.stats.match;
-  if (m) {
-    const hit = Number(out.stats.sameName) || 0; // 命中的条目数（pick 为空时是 0）
-    console.log(
-      `  ${out.picked ? '✔' : '·'} agg 打分「${name}」：扫 ${m.scanned} 条 → 命中 ${m.matched}` +
-        `（分数线 ${m.minScore || '关'}，上限 ${m.maxItems || '不封顶'}）` +
-        `；没进：低分 ${m.belowLine} / 超上限 ${m.overCap} / 名字不过闸 ${m.rejected}` +
-        `；同站同名 ${m.sameNameSameSite || 0} 条（照收，不去重）` +
-        (out.picked ? `；代表 ${out.picked.source}/${out.picked.key} 分 ${out.picked.score}` : '')
-        + (hit ? '' : ' → 结果为空')
-    );
+  /* 只有「按名字搜」这条路才值得缓存（那 4~7 秒就在它身上）。
+   * 带 `source + site + vodId` 的快路径只打一个站，而且它是 `resolveStream` 取**新鲜**集 ID 的那条路 ——
+   * 缓存它会拿到过期的集 ID，所以那条路一律不缓存、也不做合并。 */
+  const cacheKey =
+    !site && !vodId && name ? detailCacheKey({ name, year: opts.year, season: opts.season, episode: opts.episode, scoped, sources, cfg, opts }) : '';
+
+  if (cacheKey) {
+    const snap = cache.getDetail(cacheKey);
+    if (snap) {
+      /* 源清单用**这次**读到的（站点/端口会变），其余照旧 —— 快照只省掉"打源站"那一段 */
+      snap.sources = sources;
+      snap.cached = true;
+      console.log(
+        `  · agg 详情走快照「${name}」→ ${(snap.sites || []).length} 站` +
+          `（没打源站；当初算它花了 ${snap.elapsedMs || 0}ms）`
+      );
+      return Object.assign({ ok: true }, snap);
+    }
   }
-  return Object.assign({ ok: true }, out);
+
+  /** 真正去打源站的那一趟（含写快照） */
+  const compute = async () => {
+    const out = await aggregateDetail(sources, scoped, {
+      name,
+      year: opts.year,
+      source,
+      site,
+      vodId,
+      season: opts.season,
+      episode: opts.episode,
+      timeoutMs: opts.timeoutMs,
+      minScore: opts.minScore,
+      maxItems: opts.maxItems,
+      /* 接续补打（不传读设置）：前 N 条没凑够时最多再多试几条（`matchExtraK`）；
+       * `extraAll` = 匹配到底（不看 K，一直往下打到凑够或名单打完） */
+      extraK: opts.extraK,
+      extraAll: opts.extraAll,
+    });
+    out.sources = sources;
+
+    /* 打分的"一句话摘要"进日志：命中几条、扫了多少条、没进的都因为什么。
+     * 没命中时这行就是唯一线索 —— 所以把各桶计数都写出来（web 上那三个输入框怎么调，看它）。 */
+    const m = out.stats && out.stats.match;
+    if (m) {
+      const hit = Number(out.stats.sameName) || 0; // 命中的条目数（pick 为空时是 0）
+      console.log(
+        `  ${out.picked ? '✔' : '·'} agg 打分「${name}」：扫 ${m.scanned} 条 → 命中 ${m.matched}` +
+          `（分数线 ${m.minScore || '关'}，上限 ${m.maxItems || '不封顶'}）` +
+          `；没进：低分 ${m.belowLine} / 超上限 ${m.overCap} / 名字不过闸 ${m.rejected}` +
+          `；同站同名 ${m.sameNameSameSite || 0} 条（照收，不去重）` +
+          (out.picked ? `；代表 ${out.picked.source}/${out.picked.key} 分 ${out.picked.score}` : '') +
+          (hit ? '' : ' → 结果为空')
+      );
+    }
+
+    if (cacheKey) {
+      if (!cacheableDetail(out)) {
+        console.log('  · agg 详情不存快照（有站失败 / 没拿到详情 / 没命中）—— 下次仍如实去问');
+      } else if (cache.putDetail(cacheKey, out)) {
+        console.log(`  ✔ agg 详情已存快照（${(out.sites || []).length} 站；有效期见「面板设置 → 缓存设置」）`);
+      } else {
+        console.log('  · agg 详情没存快照（「缓存设置 → 聚合详情」的有效期填了 0 = 不缓存）');
+      }
+    }
+    return Object.assign({ ok: true }, out);
+  };
+
+  if (!cacheKey) return compute();
+
+  /* 同键并发合并：同一时刻两个人点开同一部片，只打一趟源站 */
+  const running = inflightDetail.get(cacheKey);
+  if (running) {
+    console.log(`  · agg 详情同键合并「${name}」—— 跟着同一趟源站查询走`);
+    return running;
+  }
+  const p = compute();
+  inflightDetail.set(cacheKey, p);
+  try {
+    return await p;
+  } finally {
+    inflightDetail.delete(cacheKey);
+  }
 }
 
 /**

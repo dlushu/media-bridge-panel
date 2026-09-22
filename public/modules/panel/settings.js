@@ -468,16 +468,29 @@ function cacheCard() {
   const cTtlMB = cnum('tmdbMaxMB', 200);
   const cImgDays = cnum('imageTtlDays', 90);
   const cImgMB = cnum('imageMaxMB', 5);
+  const cDetMin = cnum('detailTtlMinutes', 60);
+  const cDetForever = el('input', { type: 'checkbox' });
+  cDetForever.checked = !!c.detailNeverExpire;
   const out = el('div', { class: 'hint', text: '正在读取用量…' });
   const save = el('button', { class: 'btn primary', text: '保存' });
   const clear = el('button', { class: 'btn', text: '清空缓存' });
 
+  /** 聚合详情的有效期显示：勾了长期有效就说长期有效，填 0 就说不缓存 */
+  const fmtDetailTtl = (r) => {
+    const d = r.detail || {};
+    if (d.ttlForever) return '长期有效';
+    const min = Math.round(Number(d.ttlMs || 0) / 60000);
+    return min > 0 ? `${min} 分钟` : '不缓存';
+  };
+
   const paint = (r) => {
+    const d = r.detail || { rows: 0, bytes: 0, maxBytes: 0 };
     out.textContent = '';
     out.append(
       `元数据 ${r.tmdb.rows} 条 / ${fmtBytes(r.tmdb.bytes)}（上限 ${fmtBytes(r.tmdb.maxBytes)}）` +
         ` · 名字索引 ${r.names.rows} 条 / ${fmtBytes(r.names.bytes)}（上限 ${fmtBytes(r.names.maxBytes)}）` +
-        ` · 图片索引 ${r.image.rows} 条 / ${fmtBytes(r.image.bytes)}（上限 ${fmtBytes(r.image.maxBytes)}）`
+        ` · 图片索引 ${r.image.rows} 条 / ${fmtBytes(r.image.bytes)}（上限 ${fmtBytes(r.image.maxBytes)}）` +
+        ` · 聚合详情 ${d.rows} 条 / ${fmtBytes(d.bytes)}（上限 ${fmtBytes(d.maxBytes)}，当期有效期 ${fmtDetailTtl(r)}）`
     );
   };
   const load = async () => {
@@ -501,6 +514,10 @@ function cacheCard() {
               tmdbMaxMB: Number(cTtlMB.value),
               imageTtlDays: Number(cImgDays.value),
               imageMaxMB: Number(cImgMB.value),
+              /* 留空**不要**当成 0 —— 这个字段的 0 是"不缓存"，留空的意思是"用默认值"，
+               * 所以留空发 undefined（JSON 会把它丢掉，后端按默认值算）。 */
+              detailTtlMinutes: cDetMin.value.trim() === '' ? undefined : Number(cDetMin.value),
+              detailNeverExpire: cDetForever.checked,
             },
           },
         },
@@ -518,7 +535,7 @@ function cacheCard() {
   clear.addEventListener('click', async () => {
     if (
       !confirm(
-        '清空本地缓存？\n\nTMDB 元数据、名字索引、图片索引都会重来（下次浏览会重新请求 TMDB）。\n账号在另一个库里，不受影响、不用重新登录。'
+        '清空本地缓存？\n\nTMDB 元数据、名字索引、图片索引、聚合详情快照都会重来（下次浏览会重新请求 TMDB，下一次点开会重新搜源）。\n账号在另一个库里，不受影响、不用重新登录。'
       )
     ) {
       return;
@@ -541,12 +558,15 @@ function cacheCard() {
     el('p', {
       class: 'note',
       text:
-        '缓存 TMDB 元数据、名字索引（聚合层按名字反查 tmdb id 用）与图片索引，用来少打上游、也让客户端出得了封面。' +
-        '清空不影响账号，也不用重新登录。',
+        '缓存 TMDB 元数据、名字索引（聚合层按名字反查 tmdb id 用）与图片索引，用来少打上游、也让客户端出得了封面；' +
+        '另有一层「聚合详情」快照：把「这部片在源里有哪些线路、这一集定位到哪一条」存起来（客户端点一次播放会连问三遍同一件事，' +
+        '靠它省掉后两遍）。清空不影响账号，也不用重新登录。',
     }),
     el('p', {
       class: 'note',
-      text: '天数填 0 = 不缓存；上限填 0 = 不限（不淘汰）。两个 0 意思不一样，别当成一回事。',
+      text:
+        '天数 / 分钟数填 0 = 不缓存；上限填 0 = 不限（不淘汰）。两个 0 意思不一样，别当成一回事。' +
+        '「聚合详情」勾了长期有效就不按分钟数过期（改了站点勾选 / 分数线这类设置会立刻换一份新的，不会读到旧结论）。',
     }),
     el(
       'div',
@@ -560,7 +580,15 @@ function cacheCard() {
       cImgDays,
       el('span', { class: 'muted', text: '天 · 上限' }),
       cImgMB,
-      el('span', { class: 'muted', text: 'MB' }),
+      el('span', { class: 'muted', text: 'MB' })
+    ),
+    el(
+      'div',
+      { class: 'row' },
+      el('span', { class: 'muted', text: '聚合详情（线路 + 定位）' }),
+      cDetMin,
+      el('span', { class: 'muted', text: '分钟' }),
+      el('label', { class: 'chk' }, cDetForever, '长期有效'),
       save,
       clear
     ),

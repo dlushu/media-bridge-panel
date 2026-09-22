@@ -241,12 +241,14 @@ module.exports = function routes(r) {
     const all = cachedb.statsAll();
     const t = ((all.tmdb || {}).tables) || {};
     const img = ((all.image || {}).tables) || {};
+    const det = ((all.detail || {}).tables) || {};
     const one = (tbl, fallback) => Object.assign({ rows: 0, bytes: 0 }, tbl || fallback);
     const tmdbTbl = one(t.tmdb_cache);
     const nameTbl = one(t.name_index);
     const imgTbl = one(img.image_index);
+    const detTbl = one(det.detail_cache);
     return {
-      /* 三组数字一一对应 UI 上那三行；`maxBytes`/`ttl*` 是**当前策略**（面板设置里可改） */
+      /* 四组数字一一对应 UI 上那四行；`maxBytes`/`ttl*` 是**当前策略**（面板设置里可改） */
       tmdb: {
         rows: tmdbTbl.rows,
         bytes: tmdbTbl.bytes,
@@ -267,6 +269,15 @@ module.exports = function routes(r) {
         ttlDays: c.imageTtlMs / 86400000,
         path: (all.image || {}).path || '',
       },
+      detail: {
+        rows: detTbl.rows,
+        bytes: detTbl.bytes,
+        maxBytes: c.detailMaxBytes,
+        /* 「长期有效」时 ttlMs 是个很远的数 —— 如实报出去，由 UI 决定怎么显示 */
+        ttlMs: c.detailTtlMs,
+        ttlForever: !!(((settings.read('panel') || {}).cache || {}).detailNeverExpire),
+        path: (all.detail || {}).path || '',
+      },
     };
   };
 
@@ -274,7 +285,7 @@ module.exports = function routes(r) {
 
   r.add('DELETE', '/api/panel/cache', (req, res) => {
     cachedb.clearAll();
-    console.log('  ✔ 缓存已清空（tmdb.db 的元数据+名字索引、cache.db 的图片索引；账号不受影响）');
+    console.log('  ✔ 缓存已清空（tmdb.db 元数据+名字索引、detail.db 聚合详情、cache.db 图片索引；账号不受影响）');
     return sendJson(res, 200, cacheView());
   });
 
