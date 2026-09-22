@@ -2,7 +2,7 @@
 #
 # 资产契约见 docs/adr/0019-self-update-from-release.md：
 #   media-bridge-panel-<版本>.tar.gz   解包后顶层即 server.js / server/ / public/ / package.json / README.md
-#   media-bridge-panel-<版本>.sha256   sha256sum 的标准输出格式
+#   media-bridge-panel-<版本>.tar.gz.sha256   sha256sum 的标准输出格式（名字 = 包名 + .sha256）
 # 面板把压缩包解到 <DATA_DIR>/app/<版本>/，因此包内不套外层目录。
 # 只收运行所需文件，不含 docs/、.github/、tools/、node_modules/。
 
@@ -59,13 +59,20 @@ jobs:
               exit 1
             fi
           done
+          # 校验文件名必须与包名一一对应（客户端按 <包地址>.sha256 推导地址）
+          case "$archive" in
+            media-bridge-panel-*.tar.gz) ;;
+            *) echo "包名不符合约定：${archive}"; exit 1 ;;
+          esac
 
-      # sha256sum 的默认输出即 <64 位小写十六进制><两个空格><文件名>。
+      # 资产名必须是 <包名>.sha256：容器引导脚本与面板更新都按"包地址 + .sha256"去找校验文件，
+      # 名字差一点就是 404（曾经因为少了 .tar.gz 这一段，首次启动直接失败）。
       - name: 生成校验文件
         run: |
           set -euo pipefail
-          sha256sum "media-bridge-panel-${VERSION}.tar.gz" > "media-bridge-panel-${VERSION}.sha256"
-          cat "media-bridge-panel-${VERSION}.sha256"
+          archive="media-bridge-panel-${VERSION}.tar.gz"
+          sha256sum "$archive" > "${archive}.sha256"
+          cat "${archive}.sha256"
 
       # 标签重推或重跑时同名 Release 可能已存在，此时覆盖同名资产而不是失败。
       - name: 创建 Release 并上传资产
@@ -74,7 +81,7 @@ jobs:
         run: |
           set -euo pipefail
           archive="media-bridge-panel-${VERSION}.tar.gz"
-          checksum="media-bridge-panel-${VERSION}.sha256"
+          checksum="media-bridge-panel-${VERSION}.tar.gz.sha256"
           if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "$archive" "$checksum" --clobber
           else

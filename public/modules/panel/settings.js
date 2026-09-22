@@ -148,8 +148,9 @@ function updateCard() {
         setTimeout(() => location.reload(), 1500); // 留出看提示的时间，再取新版本的前端资源
         return;
       }
-      showResult('hint warn', ['面板未在 60 秒内恢复，请查看容器日志。']);
-      toast('面板未在 60 秒内恢复，请查看容器日志', true);
+      const timeoutMsg = `面板未在 ${UPDATE_POLL_LIMIT_MS / 1000} 秒内恢复，请查看容器日志。`;
+      showResult('hint warn', [timeoutMsg]);
+      toast(timeoutMsg, true);
     } catch (e) {
       showResult('hint warn', ['更新失败：' + e.message]);
       toast('更新失败：' + e.message, true);
