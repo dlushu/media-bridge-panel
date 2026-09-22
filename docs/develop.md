@@ -304,6 +304,10 @@ module.exports = {
   - 旧版单账号（`settings/emby.json` 中的明文）在首次用到该库时自动迁移，并清除明文。
   - `UserId` 仍由「serverId + 用户名」派生，因此**改用户名或删账号 = 该账号的客户端需要重新登录**。
   - 「配置备份/还原」目前只覆盖 `settings/`，不含该库。
+- Emby **拉流（302 之前）**：构建版本列表时会把"这一集在这一线路里的播放 id"记进服务端备忘
+  （`(条目 Id, 源, 站点, 线路, vod) → 集 id`，TTL 30 分钟），拉流时先查它 —— 命中就直接调 `/play`，
+  省掉一次源详情（实测那一次约 2 秒，命中后整跳 0.1 秒上下）；未命中（重启/过期/换源）照旧取详情。
+  **备忘只影响快慢，不影响对错。**
 - Emby **AccessToken 校验**：登录签发的 token 存 `sessions` 表，**11 个端点**校验它。
   - 三种携带方式都识别：`X-Emby-Token` / `Authorization`·`X-Emby-Authorization` 中的 `Token="…"` /
     query `api_key=`。
