@@ -31,9 +31,12 @@
 镜像发布在 Docker Hub：`dlushu/media-bridge-panel`，同时提供 `linux/amd64` 与 `linux/arm64`。
 
 ```bash
+# 8099        面板本身（Emby 客户端连的就是它）
+# 9988-9998   给运行的源实例用的端口：面板拉起的每个源各占一个，从 9988 起依次 +1
 docker run -d --name media-bridge-panel --init --restart unless-stopped \
   -p 8099:8099 -p 9988-9998:9988-9998 \
   -v media_bridge-data:/data \
+  -e TZ=Asia/Shanghai \
   dlushu/media-bridge-panel:runtime-1
 ```
 
@@ -47,13 +50,18 @@ services:
     restart: unless-stopped
     init: true
     ports:
-      - "8099:8099"
-      - "9988-9998:9988-9998"
+      - "8099:8099"              # 面板本身（Emby 客户端连的就是它）
+      - "9988-9998:9988-9998"    # 给运行的源实例用的端口：每个源各占一个，从 9988 起依次 +1
     volumes:
       - media_bridge-data:/data
     environment:
       TZ: Asia/Shanghai
       APP_REPO: dlushu/media-bridge-panel
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   media_bridge-data:
@@ -97,6 +105,7 @@ npm start
 docker run -d --name media-bridge-panel --init --restart unless-stopped \
   -p 8099:8099 -p 9988-9998:9988-9998 \
   -v media_bridge-data:/data \
+  -e TZ=Asia/Shanghai \
   -e APP_SOURCE_URL=https://example.com/pkgs/media-bridge-panel-{version}.tar.gz \
   dlushu/media-bridge-panel:runtime-1
 ```
@@ -169,7 +178,7 @@ Emby
 | 端口 | 用途 |
 |---|---|
 | `8099` | 面板本体（Emby 兼容接口），有密码保护 |
-| `9988-9998` | 面板托管的源自身的 HTTP 服务，**没有鉴权** |
+| `9988-9998` | **给运行的源实例用的端口**：面板拉起的每个源各占一个（从 9988 起依次 +1），源的接口**没有鉴权** |
 
 后一组端口仅用于让客户端直连源，应只暴露在受信任的网络内。需要外网访问时，只发布 `8099` 并置于
 反向代理与 HTTPS 之后。更多细节见 [SECURITY.md](SECURITY.md)。
