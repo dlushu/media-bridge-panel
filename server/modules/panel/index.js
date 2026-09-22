@@ -40,10 +40,12 @@ module.exports = {
        *   tmdbMaxMB    元数据缓存的总字节上限（实测 rich 响应 60~120KB，200MB ≈ 2000~3000 部片）
        *   imageTtlDays 图片索引的存活期 —— URL 几乎不变，但换图床基地址后靠它自愈
        *   imageMaxMB   图片索引上限（无头路径，一条约几十字节，5MB 已经远超实际用量）
-       *   detailTtlMinutes / detailNeverExpire
-       *                聚合详情快照活多久 —— **按分钟**（它是秒级~分钟级的短缓存：客户端点一次
-       *                播放会连问三遍同一件事，那两遍靠它省掉）。0 = 不缓存；勾了「长期有效」
-       *                就不看分钟数。上限写死在 cachedb 里（照 name_index 的先例，不进设置页）。
+       *   detailTtlMinutes / detailNeverExpire / detailMaxMB
+       *                聚合详情快照活多久、最多占多少字节 —— **按分钟**（它是秒级~分钟级的短缓存：
+       *                客户端点一次播放会连问三遍同一件事，那两遍靠它省掉）。0 = 不缓存；勾了
+       *                「长期有效」就不看分钟数；`detailMaxMB` 是总字节上限（0 = 不限）。
+       *                上限默认 32MB：一条快照含全站的线路与选集（每个选集 ID 是 600~720 字符的
+       *                token，一条详情里还存了两份），实测几十~几百 KB 一条。
        * **上限一律按字节不按条数**：lean 1.9KB vs rich 119KB 差 60 倍，按条数算不准。 */
       cache: Object.assign({}, cachedb.DEFAULTS),
     }),
@@ -60,6 +62,7 @@ module.exports = {
       { key: 'cache.imageTtlDays', label: '图片索引天数', type: 'text', placeholder: '90' },
       { key: 'cache.imageMaxMB', label: '图片索引上限 MB', type: 'text', placeholder: '5' },
       { key: 'cache.detailTtlMinutes', label: '聚合详情分钟数', type: 'text', placeholder: '60（0 = 不缓存）' },
+      { key: 'cache.detailMaxMB', label: '聚合详情上限 MB', type: 'text', placeholder: '32（0 = 不限）' },
       { key: 'cache.detailNeverExpire', label: '聚合详情长期有效', type: 'boolean', hint: '勾上就不按分钟数过期（只要你不动设置，源里有什么就一直用那份）' },
     ],
     validate: (o) => {
@@ -77,7 +80,7 @@ module.exports = {
        * ⚠️ 两个 0 的语义**不一样**（见 core/cachedb.js 的 cfg）：
        *   天数 / 分钟数 0 = 不缓存（写完即过期）；上限 0 = **不限**（不淘汰）。二者不可当作同一语义处理。 */
       const c = (o && o.cache) || {};
-      for (const key of ['tmdbTtlDays', 'tmdbMaxMB', 'imageTtlDays', 'imageMaxMB', 'detailTtlMinutes']) {
+      for (const key of ['tmdbTtlDays', 'tmdbMaxMB', 'imageTtlDays', 'imageMaxMB', 'detailTtlMinutes', 'detailMaxMB']) {
         const v = c[key];
         if (v === undefined || v === null || v === '') continue;
         const n = Number(v);

@@ -47,9 +47,13 @@ const DEFAULTS = {
   imageTtlDays: 90,
   imageMaxMB: 5,
   /** 聚合详情缓存（`detail_cache`，见 agg/cache.js）：**按分钟**，因为它是秒级~分钟级的短缓存。
-   *  0 = 不缓存（与上面「天数 0 = 不缓存」同一口径）；勾了「长期有效」时这个数不看。 */
+   *  0 = 不缓存（与上面「天数 0 = 不缓存」同一口径）；勾了「长期有效」时这个数不看。
+   *  `detailMaxMB` = 总字节上限，**可调**（「面板设置 → 缓存设置」，0 = 不限）。
+   *  默认 32MB 是实测值：一条快照含全站的线路与选集，而每个选集 ID 就是 600~720 字符的 token
+   *  （且那条详情里存了两份：站源原始响应 + 解析结果），实测几十~几百 KB 一条。 */
   detailTtlMinutes: 60,
   detailNeverExpire: false,
+  detailMaxMB: 32,
 };
 
 /**
@@ -58,10 +62,6 @@ const DEFAULTS = {
  * 而 Infinity 落库会变成 NULL/精度问题，所以给一个够远的有限值。
  */
 const NEVER_TTL_MS = 100 * 365 * 86400000;
-
-/** 聚合详情缓存的总字节上限（**写死不暴露**，照 name_index 的先例）。
- *  一条详情含全站的线路与选集，实测几十~几百 KB，32MB 够放上百部片。 */
-const DETAIL_MAX_BYTES = 32 * 1024 * 1024;
 
 /**
  * 当前缓存策略（毫秒/字节），读**面板设置**的 `cache.*`（由 emby 设置迁入：
@@ -79,7 +79,7 @@ function cfg() {
     imageMaxBytes: num(c.imageMaxMB, DEFAULTS.imageMaxMB) * 1024 * 1024,
     /* 「长期有效」勾了就无视分钟数（`detailNeverExpire` 是布尔，不是数字） */
     detailTtlMs: c.detailNeverExpire ? NEVER_TTL_MS : detailMinutes * 60000,
-    detailMaxBytes: DETAIL_MAX_BYTES,
+    detailMaxBytes: num(c.detailMaxMB, DEFAULTS.detailMaxMB) * 1024 * 1024,
   };
 }
 
@@ -277,7 +277,6 @@ module.exports = {
   NAME_TTL_MS,
   NAME_MAX_BYTES,
   NEVER_TTL_MS,
-  DETAIL_MAX_BYTES,
   DEFAULTS,
   cfg,
   createStore,

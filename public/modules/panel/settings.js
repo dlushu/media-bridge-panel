@@ -474,6 +474,7 @@ function cacheCard() {
   const cImgDays = cnum('imageTtlDays', 90);
   const cImgMB = cnum('imageMaxMB', 5);
   const cDetMin = cnum('detailTtlMinutes', 60);
+  const cDetMB = cnum('detailMaxMB', 32);
   const cDetForever = el('input', { type: 'checkbox' });
   cDetForever.checked = !!c.detailNeverExpire;
   const out = el('div', { class: 'hint', text: '正在读取用量…' });
@@ -522,6 +523,8 @@ function cacheCard() {
               /* 留空**不要**当成 0 —— 这个字段的 0 是"不缓存"，留空的意思是"用默认值"，
                * 所以留空发 undefined（JSON 会把它丢掉，后端按默认值算）。 */
               detailTtlMinutes: cDetMin.value.trim() === '' ? undefined : Number(cDetMin.value),
+              /* 同上：留空 = 用默认值（32MB），填 0 才是"不限" */
+              detailMaxMB: cDetMB.value.trim() === '' ? undefined : Number(cDetMB.value),
               detailNeverExpire: cDetForever.checked,
             },
           },
@@ -592,7 +595,9 @@ function cacheCard() {
       { class: 'row' },
       el('span', { class: 'muted', text: '聚合详情（线路 + 定位）' }),
       cDetMin,
-      el('span', { class: 'muted', text: '分钟' }),
+      el('span', { class: 'muted', text: '分钟 · 上限' }),
+      cDetMB,
+      el('span', { class: 'muted', text: 'MB' }),
       el('label', { class: 'chk' }, cDetForever, '长期有效'),
       save,
       clear
