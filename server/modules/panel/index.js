@@ -6,6 +6,7 @@
  *   对外：/api/panel/*、/api/modules*、/api/meta
  */
 const routes = require('./routes');
+const update = require('./update');
 const logbus = require('../../core/logbus');
 const tmdb = require('../../core/tmdb');
 const cachedb = require('../../core/cachedb');
@@ -105,6 +106,9 @@ module.exports = {
       /* 清理失败不该让"保存设置"这件事失败 */
     }
   },
+
+  /** 启动成功后清掉"当前版本之外"的版本目录（每次启动都跑，见 update.js 的 pruneOnBoot） */
+  pruneOnBoot: (opts) => update.pruneOnBoot(opts),
 
   routes,
 };

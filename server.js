@@ -96,6 +96,7 @@ const server = http.createServer(async (req, res) => {
 
 const sourceModule = registry.get('source');
 const embyModule = registry.get('emby');
+const panelModule = registry.get('panel');
 
 server.listen(WEB_PORT, WEB_HOST, async () => {
   /* 名字读 core/branding.js（改名只改那一处 + 前端那份 + package.json + index.html 兜底）；
@@ -112,6 +113,10 @@ server.listen(WEB_PORT, WEB_HOST, async () => {
   if (sourceModule && typeof sourceModule.startAutoUpdate === 'function') sourceModule.startAutoUpdate();
   /* emby 层同理：把随包的内置首页示例同步进插件列表（md5 一致就跳过，见 emby/index.js autostart） */
   if (embyModule && typeof embyModule.autostart === 'function') await embyModule.autostart();
+  /* 更新即完整替换：**每次启动成功后**清掉当前版本之外的版本目录（旧版本不留档，也不作本地回退，
+   * 决策见 docs/adr/0021-update-replaces-app-dir.md）。它自己会延迟几秒再动手，
+   * 也会在非受管运行方式下跳过（直接跑源码时数据目录里的 app/ 不该被动）。 */
+  if (panelModule && typeof panelModule.pruneOnBoot === 'function') panelModule.pruneOnBoot();
 });
 
 /* 进程级兜底：**一个请求出问题不该把整个面板带走**。曾出现过整进程退出 ——

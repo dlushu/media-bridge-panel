@@ -80,8 +80,11 @@ function updateCard() {
     latest.textContent = r.latest || '未知';
     mode.textContent = r.managed ? '受管（由容器引导）' : '非受管';
     const inst = Array.isArray(r.installed) ? r.installed : [];
+    /* 更新即完整替换（见 docs/adr/0021）：旧版本在新版本启动后被清掉，
+     * 所以这里只列磁盘上现有的版本，不再提"上一版" —— 它没有回退的意义。 */
     versions.textContent =
-      (inst.length ? `已安装：${inst.join(' / ')}` : '已安装：未知') + (r.previous ? ` · 上一版：${r.previous}` : '');
+      (inst.length ? `已安装：${inst.join(' / ')}` : '已安装：未知') +
+      (inst.length > 1 ? '（旧版本会在启动后被清理）' : '');
 
     const hasNew = !!(r.hasUpdate && r.latest);
     install.classList.toggle('hidden', !hasNew);
@@ -127,7 +130,9 @@ function updateCard() {
     if (!target) return;
     if (
       !confirm(
-        `更新到 ${target}？\n\n面板会下载并安装这个版本，然后重启应用进程（容器不停）。\n重启期间页面会短暂打不开，通常几秒内恢复。`
+        `更新到 ${target}？\n\n面板会下载并安装这个版本，然后重启应用进程（容器不停）。\n` +
+          `重启期间页面会短暂打不开，通常几秒内恢复。\n\n` +
+          `注意：更新即完整替换，新版本起来后旧版本目录会被清掉，本机不再保留可回退的旧版本。`
       )
     ) {
       return;
@@ -165,7 +170,7 @@ function updateCard() {
     el('h3', { text: '版本与更新' }),
     el('p', {
       class: 'note',
-      text: '面板可以从 Release 安装新版本，安装后应用进程会重启（容器不停）。更新只由你手动触发，不会在后台自动进行。',
+      text: '面板可以从 Release 安装新版本，安装后应用进程会重启（容器不停）。更新只由你手动触发，不会在后台自动进行。更新即完整替换：新版本起来后，旧版本目录会被清掉。',
     }),
     el('div', { class: 'kv' }, el('span', { class: 'k', text: '当前版本' }), cur),
     el('div', { class: 'kv' }, el('span', { class: 'k', text: '最新版本' }), latest),

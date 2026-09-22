@@ -2,7 +2,9 @@
 /**
  * 面板自身更新（决策与理由见 docs/adr/0019-self-update-from-release.md）。
  *
- * 只做三件事：查最新版本、把某个 Release 版本装到数据卷、请求监督者重启。
+ * 做四件事：查最新版本、把某个 Release 版本装到数据卷、请求监督者重启、
+ * 启动成功后**清掉当前版本之外的所有版本目录**（更新即完整替换，
+ * 见 docs/adr/0021-update-replaces-app-dir.md）。
  * 查版本结果缓存 60 秒，避免频繁刷新把 GitHub API 打满。
  *
  * ⚠️ **目录布局、包名、校验文件格式必须与容器的引导脚本（`docker/entrypoint.js`）保持一致** ——
@@ -31,6 +33,9 @@ const REPO = String(process.env.APP_REPO || 'dlushu/media-bridge-panel').trim();
 const REQUIRED = ['server.js', 'package.json', 'server/core/paths.js', 'public/index.html'];
 
 const CHECK_TTL_MS = 60 * 1000;
+
+/** 启动成功后隔多久执行"清旧版本"（见 `pruneOnBoot`）：留一小段窗口，万一这一版起来就出问题，旧目录还在 */
+const PRUNE_DELAY_MS = 15 * 1000;
 
 /* ------------------------------------------------------------------ 基础 */
 
@@ -112,6 +117,90 @@ function isManaged() {
   const root = realOrSelf(APP_ROOT);
   const run = realOrSelf(runningDir());
   return run === root || run.startsWith(root + path.sep);
+}
+
+/* ------------------------------------------------ 只保留当前版本（清旧版本） */
+
+/**
+ * 白名单：**绝不能删**的三个版本。
+ *
+ *   ① 正在运行的这一版（`package.json` 的 version）—— 它就是这个进程自己的代码目录；
+ *      静态文件是**每个请求从磁盘读**的（`core/http.js` 的 serveStatic），删了页面立刻 404；
+ *   ② `current.json` 记的那一版 —— 正常与 ① 相同；万一不同，它才是监督者下次要拉起的那个；
+ *   ③ `APP_VERSION` 指定的那一版 —— 删了引导脚本每次启动都会重新下载，网络不通时直接起不来。
+ */
+function protectedVersions() {
+  const keep = new Set();
+  const running = String(pkg.version || '').trim();
+  if (running) keep.add(running);
+  const cur = readJson(CURRENT_FILE);
+  if (cur && cur.version) keep.add(String(cur.version));
+  const want = String(process.env.APP_VERSION || '').trim().replace(/^v/, '');
+  if (want) keep.add(want);
+  return keep;
+}
+
+/**
+ * 清掉当前版本之外的一切：旧版本目录 + `install()` 失败留下的 `.staging-*` 暂存目录。
+ *
+ * ⚠️ **只删"版本目录"与暂存目录**：`current.json`（当前版本记录）与 `.restart`（重启协议）
+ * 同样住在 `app/` 下，必须留着 —— 所以这里绝不清空整个 `app/`，而是按名字逐个判断。
+ *
+ * best-effort：删不掉只记一行日志，绝不让调用方失败（一个删不掉的旧目录不该影响启动）。
+ */
+function pruneVersions() {
+  const keep = protectedVersions();
+  const out = { kept: [...keep], removed: [], failed: [] };
+  let names = [];
+  try {
+    names = fs.readdirSync(APP_ROOT);
+  } catch {
+    return out; // 目录还不存在：没什么可清的
+  }
+  for (const n of names) {
+    const isStaging = n.startsWith('.staging-');
+    const isVersion = isValidVersion(n);
+    if (!isStaging && !isVersion) continue; // current.json / .restart 等协议文件，跳过
+    if (isVersion && keep.has(n)) continue;
+    try {
+      fs.rmSync(path.join(APP_ROOT, n), { recursive: true, force: true });
+      out.removed.push(n);
+    } catch (e) {
+      out.failed.push({ name: n, error: (e && e.message) || String(e) });
+    }
+  }
+  return out;
+}
+
+/**
+ * 启动成功后调一次（`server.js` 的监听回调里）——**每次启动都跑**。
+ *
+ * 为什么每次启动都跑、而不是只在更新后跑：
+ *   · 清理是**新版本自己**做的，旧版本（还没有这段代码）不需要任何配合，
+ *     所以第一次更新就能把历史版本收干净；
+ *   · 每次启动都跑 ⇒ "`app/` 里只有当前版本"在任何时刻都成立，不依赖"正好发生过一次更新"。
+ *
+ * 为什么延迟 `PRUNE_DELAY_MS` 再动手：这一版虽然已经起来了，但那几秒内若立刻出问题，
+ * 旧目录还在（本地唯一的退路）。非受管运行方式（直接跑源码）返回 null、什么都不做 ——
+ * 那种情况下数据目录里的 `app/` 不该被动。
+ */
+function pruneOnBoot({ delayMs = PRUNE_DELAY_MS } = {}) {
+  if (!isManaged()) return null;
+  const timer = setTimeout(() => {
+    try {
+      const r = pruneVersions();
+      if (r.removed.length) {
+        console.log(`  · 更新：已清掉旧版本 ${r.removed.join(' / ')}（只留 ${r.kept.join(' / ')}）`);
+      }
+      for (const f of r.failed) {
+        console.log(`  ⚠ 更新：旧版本 ${f.name} 清理失败（不影响运行）：${f.error}`);
+      }
+    } catch (e) {
+      console.log(`  ⚠ 更新：清理旧版本失败（不影响运行）：${(e && e.message) || e}`);
+    }
+  }, Math.max(0, Number(delayMs) || 0));
+  timer.unref(); // 一个清理定时器不该把进程吊住
+  return timer;
 }
 
 /* ------------------------------------------------------------------ 查版本 */
@@ -292,5 +381,8 @@ module.exports = {
   resolveLatest,
   isManaged,
   listInstalled,
+  /* 清理：`pruneOnBoot` 是 `server.js` 启动成功后调的那个；`pruneVersions` 供排障与自测直接调用 */
+  pruneVersions,
+  pruneOnBoot,
   APP_ROOT,
 };

@@ -28,6 +28,7 @@
 | [0018](0018-branding-single-source.md) | 产品名只在一处定义 | 已采纳 |
 | [0019](0019-self-update-from-release.md) | 自身更新：应用装在数据卷、按 Release 资产安装、进程重启生效 | 已采纳 |
 | [0020](0020-detail-snapshot.md) | 详情快照 + 剧集详情提前返回（同一次点播被算三遍的那一步存下来） | 已采纳 |
+| [0021](0021-update-replaces-app-dir.md) | 更新即完整替换：只保留当前版本，不留本地旧版本 | 已采纳 |
 
 ## 新增一条 ADR
 
