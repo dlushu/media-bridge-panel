@@ -122,15 +122,18 @@ export function renderAgg(v) {
    * 同时把「线路过滤」（`agg.json` 的 `lineFilter`，只匹配线路名）的结果也标出来：过滤**只作用在
    * 客户端那侧的版本列表**，弹窗给的是原始线路 —— 所以必须标出来，否则看着像"过滤没生效"。
    */
-  async function showItemVersions(m, se, ep) {
+  async function showItemVersions(m, se, ep, pick) {
     const useSeason = se === undefined ? num(seasonInput) : se;
     const useEpisode = ep === undefined ? num(episodeInput) : ep;
+    /* `pick = 'items'` = **电影取法**（每条线路列出全部播放项）—— 客户端对电影走的就是这条，
+     * 弹窗要看"客户端会看到什么"就得用同一取法。剧集不传（按季集号定位）。 */
+    const usePick = pick === 'items' ? 'items' : undefined;
     try {
       /* 过滤规则与详情一起拿（两个请求并发；规则读的是模块端点 —— 权威那份） */
       const [d, st] = await Promise.all([
         api('/api/agg/detail', {
           method: 'POST',
-          body: { source: m.source, site: m.siteKey, vodId: m.vod_id, season: useSeason, episode: useEpisode },
+          body: { source: m.source, site: m.siteKey, vodId: m.vod_id, season: useSeason, episode: useEpisode, pick: usePick },
         }),
         api('/api/modules/agg/settings').catch(() => null),
       ]);
@@ -143,9 +146,10 @@ export function renderAgg(v) {
       }
       openVersionsModal(`${m.siteName || m.siteKey} · ${m.vod_name || ''}`, d, {
         asked: useEpisode !== undefined && useEpisode !== null && useEpisode !== '',
+        pickItems: usePick === 'items',
         filterRaw: raw,
         filterRe: re,
-        onRetryFirst: () => showItemVersions(m, 1, 1),
+        onRetryItems: () => showItemVersions(m, undefined, undefined, 'items'),
       });
     } catch (e) {
       toast('取版本失败：' + e.message, true);
@@ -219,11 +223,13 @@ export function renderAgg(v) {
  * 版本弹窗：`detail` 的返回里，每站「线路 N · 定位到这一集 M」+ 逐条线路的定位情况。
  *
  * `opts`：
- *   · `asked`     —— 这次请求**有没有带集号**。没带就**没做定位**，此时不能说"不会进客户端的版本列表"
- *                    （该说法不成立：客户端对电影是按"第 1 项"取的）。
+ *   · `asked`      —— 这次请求**有没有带集号**（只对剧集取法有意义）。没带就**没做定位**，此时不能说
+ *                     "不会进客户端的版本列表"。
+ *   · `pickItems`  —— 这次用的是**电影取法**（`pick: 'items'`）：每条线路的**每个播放项**各成一个版本。
+ *                     客户端对电影走的就是这条，所以弹窗的判定与它一致，不再有"没定位到"这回事。
  *   · `filterRaw` / `filterRe` —— 「线路过滤」规则（只匹配线路名）。**过滤只在客户端那侧生效**
- *                    （`emby/service.js` 拼版本列表时），弹窗给的是原始线路 ⇒ 得逐条标出来。
- *   · `onRetryFirst` —— 「按第 1 项重查」的回调（电影用）。
+ *                     （`emby/service.js` 拼版本列表时），弹窗给的是原始线路 ⇒ 得逐条标出来。
+ *   · `onRetryItems` —— 「按电影取法重查（列全部播放项）」的回调。
  */
 function openVersionsModal(title, d, opts = {}) {
   const sites = d.sites || [];
@@ -231,18 +237,25 @@ function openVersionsModal(title, d, opts = {}) {
   if (!sites.length) {
     body.push(el('div', { class: 'muted', text: '这次没有站点返回（条目取不到 / 站点失败，看面板日志）。' }));
   }
-  /* 没填集号：把"为什么全是没定位到"和"怎么重查"先说清楚 */
-  if (!opts.asked) {
+  if (opts.pickItems) {
+    body.push(
+      el('div', {
+        class: 'hint',
+        text: '电影取法：每条线路的全部播放项各列成一个版本（同一部片的多个压制版本都会出现）。',
+      })
+    );
+  } else if (!opts.asked) {
+    /* 没填集号：把"为什么全是没定位到"和"怎么重查"先说清楚 */
     body.push(
       el(
         'div',
         { class: 'hint' },
         '⚠️ 这次没填「集」，所以没做定位 —— 下面每条线路都会显示"没定位到"，那不代表客户端也拿不到。',
         el('br'),
-        '电影在客户端那边是按「第 1 项」取的，点下面那个按钮就能照客户端的方式重查；剧集请把集号填上。',
+        '电影在客户端那边是按「每条线路的全部播放项」列的，点下面那个按钮就能照客户端的方式重查；剧集请把集号填上。',
         el('br'),
-        opts.onRetryFirst
-          ? el('button', { class: 'btn mini primary ml-sm', text: '按第 1 项重查（电影）', onclick: () => opts.onRetryFirst() })
+        opts.onRetryItems
+          ? el('button', { class: 'btn mini primary ml-sm', text: '按电影取法重查（列全部播放项）', onclick: () => opts.onRetryItems() })
           : null
       )
     );
@@ -265,6 +278,8 @@ function openVersionsModal(title, d, opts = {}) {
     const allLines = entries.reduce((a, e) => a.concat(e.det.lines || []), []);
     const kept = allLines.filter((l) => !opts.filterRe || opts.filterRe.test(String(l.flag || '')));
     const tgtAll = kept.filter((l) => l.target).length;
+    /* 电影取法下"进客户端的版本数" = **各项之和**（线路 × 播放项），不是线路数 */
+    const itemAll = kept.reduce((n, l) => n + ((l.items || []).length || 0), 0);
 
     box.append(
       el(
@@ -273,9 +288,11 @@ function openVersionsModal(title, d, opts = {}) {
         el('span', { class: 'dot ' + (s.detail ? 'running' : 'error') }),
         el('span', { class: 'chip tag', text: (s.sourceName ? s.sourceName + ' · ' : '') + (s.name || s.key) }),
         s.detail
-          ? opts.asked
-            ? el('span', { class: 'badge' + (tgtAll ? ' ok' : ''), text: `进客户端版本列表 ${tgtAll} 条线路` })
-            : el('span', { class: 'badge', text: `线路 ${allLines.length}（没填集号，未定位）` })
+          ? opts.pickItems
+            ? el('span', { class: 'badge' + (itemAll ? ' ok' : ''), text: `进客户端版本列表 ${itemAll} 个版本` })
+            : opts.asked
+              ? el('span', { class: 'badge' + (tgtAll ? ' ok' : ''), text: `进客户端版本列表 ${tgtAll} 条线路` })
+              : el('span', { class: 'badge', text: `线路 ${allLines.length}（没填集号，未定位）` })
           : el('span', { class: 'badge err', text: s.error || '这条没取到详情' })
       )
     );
@@ -288,15 +305,24 @@ function openVersionsModal(title, d, opts = {}) {
       }
       for (const l of lines) {
         const dropped = !!opts.filterRe && !opts.filterRe.test(String(l.flag || ''));
-        const inList = !dropped && !!l.target;
+        const items = l.items || [];
+        /* 两种取法的"进不进列表"判据不同：电影看**播放项**，剧集看**定位到的那一项** */
+        const inList = !dropped && (opts.pickItems ? items.length > 0 : !!l.target);
+        const count = opts.pickItems ? items.length : (l.episodes || []).length;
+        const unit = opts.pickItems ? '项' : '集';
         let why;
-        if (l.target) {
+        if (opts.pickItems) {
+          why = items.length
+            ? `✔ 这条线路有 ${items.length} 个播放项 → 列 ${items.length} 个版本（规格不同的各占一个版本行）`
+            : '✘ 这条线路没有播放项（不会进客户端的版本列表）';
+          if (items.length && dropped) why += ` —— 但线路名不匹配 /${opts.filterRaw}/，不会进客户端的版本列表`;
+        } else if (l.target) {
           why = `✔ 定位到：${l.target.name}（${l.target.matchedBy || ''}）` +
             (dropped ? ` —— 但线路名不匹配 /${opts.filterRaw}/，不会进客户端的版本列表` : '');
         } else if (dropped) {
           why = `✘ 线路名不匹配 /${opts.filterRaw}/ —— 不会进客户端的版本列表`;
         } else if (!opts.asked) {
-          why = '· 这次没填「集」→ 没做定位（点上面的「按第 1 项重查」看客户端那侧的结果）';
+          why = '· 这次没填「集」→ 没做定位（点上面的「按电影取法重查」看客户端那侧的结果）';
         } else {
           why = '✘ 这一集在这条线路里没定位到（不会进客户端的版本列表）';
         }
@@ -307,7 +333,7 @@ function openVersionsModal(title, d, opts = {}) {
             el(
               'div',
               { class: 'agg-body' },
-              el('div', { class: 'agg-name' }, l.flag || '-', el('span', { class: 'badge ml-sm', text: `${(l.episodes || []).length} 集` })),
+              el('div', { class: 'agg-name' }, l.flag || '-', el('span', { class: 'badge ml-sm', text: `${count} ${unit}` })),
               el('div', { class: 'note', text: why })
             )
           )

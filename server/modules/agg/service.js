@@ -247,16 +247,20 @@ async function aggregateSearch(sources, sites, { wd, page = '1', timeoutMs, conc
 /**
  * **一条条目（一个 `vod_id`）取回来的详情能不能用** —— 这是"凑够 N 条"里那"一条"的判据：
  *   · 必须有线路；
- *   · 请求带了集号时，**至少要有一条线路定位到了这一集** —— 只有线路、却定位不到这一集的那种，
- *     Emby 那边会因为"点了必然 404"把它过滤掉（`emby/service.js` 的 `if (!line.target) continue`），
- *     等于白打一次 `/detail`（实测：`斗破苍穹年番` 那条 10 条线路里有 6 条能定位、虎斑那条 0 条）。
+ *   · 剧集（`need === true`，即请求带了集号）：**至少要有一条线路定位到了这一集** ——
+ *     只有线路、却定位不到这一集的那种，Emby 那边会因为"点了必然 404"把它过滤掉
+ *     （`emby/service.js` 的 `if (!targets.length) continue`），等于白打一次 `/detail`
+ *     （实测：`斗破苍穹年番` 那条 10 条线路里有 6 条能定位、虎斑那条 0 条）；
+ *   · 电影（`need === 'item'`）：**至少要有一条线路带播放项**（同一条理由）。
  *
  * ⚠️ 计数单位是**条目**，不是站点、也不是线路：一个站可以有多条条目（代表 + 变体），
  * 每一条都可能是"能用"的那一条（实测就是靠变体才拿到 E211 的）。
  */
-function detailUsable(d, needTarget) {
+function detailUsable(d, need) {
   const lines = (d && d.lines) || [];
-  return lines.length > 0 && (!needTarget || lines.some((l) => l.target));
+  if (!lines.length) return false;
+  if (need === 'item') return lines.some((l) => (l.items || []).length > 0);
+  return !need || lines.some((l) => l.target);
 }
 
 /* ============================================================
@@ -541,8 +545,14 @@ function variantLabel(fullName) {
   return parts.join(' ');
 }
 
-/** 取一个站的 /detail 并拆成规范化结构（source = 它所属的源） */
-async function fetchDetail(source, site, vodId, timeoutMs, season, episode) {
+/**
+ * 取一个站的 /detail 并拆成规范化结构（source = 它所属的源）。
+ *
+ * `pick` 决定"什么算可播目标"（电影/剧集两套取法，见 docs/adr/0022）：
+ *   · 缺省 `''`  —— **剧集**取法：按传进来的季集号定位，每条线路的 `line.target` 是**这一集**；
+ *   · `'items'` —— **电影**取法：**每条线路的每个播放项**各成一个目标（`line.items[]`），不按集号匹配。
+ */
+async function fetchDetail(source, site, vodId, timeoutMs, season, episode, pick) {
   /* 站点字段统一叫 `key`（与 searchSite / 对外形状一致）—— 曾用名 `site`，与 search 混用会使消费方读不到 key */
   const r0 = { source: source.id, key: site.key, name: site.name, api: site.api, ok: false, ms: 0, data: null, detail: null, error: null };
   const t0 = Date.now();
@@ -581,6 +591,34 @@ async function fetchDetail(source, site, vodId, timeoutMs, season, episode) {
      * 同一个条目，填了季 6 条定位到、不填季 0 条）—— 而源里的集名常常只有集号
      * （`[842.5MB]211 4K.mp4`），前端填写时也往往只填集。定位规则本身**不依赖季号**
      * （见 `locateEpisode` 的 ②③），所以这里放开。 */
+    if (pick === 'items') {
+      /* ---- 电影取法：**每条线路的每个播放项**都是一个可播目标 ----
+       * 为什么不能借季集号定位（曾经的写法）：电影文件名里没有集号（只有 `[5.0GB]` / `2026` / `1080p` /
+       * `X265` 这类规格），而 `locateEpisode` 的三条路全是"按集名里的集号匹配" —— 实测 20 部电影里
+       * 19 部一条都定位不到（源里有 4~20 条线路，`target` 却全空）⇒ 客户端版本列表恒为 0 条。
+       * 电影在协议里本来就是「一条线路 + 若干播放项」（`vod_play_url` 里 `#` 分隔的那些），
+       * 取每一项都是**确定的**（不是猜），所以这里全列出来，由客户端自己挑压制版本。
+       * `line.target` 仍保留 = 第 1 项：诊断字段与既有消费方都不用改。 */
+      let empty = 0;
+      for (const line of lines) {
+        const items = (line.episodes || []).map((ep) =>
+          Object.assign(
+            { flag: line.flag, name: ep.name, id: ep.id, index: ep.index, matchedBy: 'item' },
+            parseEpisodeMeta(ep.name)
+          )
+        );
+        if (!items.length) {
+          empty += 1;
+          continue;
+        }
+        line.items = items;
+        line.target = items[0];
+      }
+      r0.detail.pick = 'items';
+      r0.detail.target = (lines.find((l) => l.target) || {}).target || null;
+      if (empty) r0.detail.targetNote = `${empty} 条线路里没有播放项（源里那几条是空壳）`;
+      return r0;
+    }
     if (episode !== undefined && episode !== null) {
       const want = { episode: Number(episode) };
       if (season !== undefined && season !== null) want.season = Number(season);
@@ -641,6 +679,9 @@ async function aggregateDetail(sources, sites, opts = {}) {
 
   const season = opts.season === undefined || opts.season === null || opts.season === '' ? null : Number(opts.season);
   const episode = opts.episode === undefined || opts.episode === null || opts.episode === '' ? null : Number(opts.episode);
+  /* 取法：`items` = 电影（每条线路列出**全部播放项**），缺省 = 剧集（按季集号定位一条）。
+   * 两者互斥地决定"什么算可播目标"，判据与理由见 `fetchDetail` 顶部。 */
+  const pick = opts.pick === 'items' ? 'items' : '';
 
   /* ---- 快路径：已知绑定（source + site + vodId），跳过搜索 ---- */
   if (opts.site && opts.vodId) {
@@ -650,7 +691,7 @@ async function aggregateDetail(sources, sites, opts = {}) {
       out.elapsedMs = Date.now() - t0;
       return out;
     }
-    const r = await fetchDetail(needSource(byId, s.source), s, opts.vodId, timeoutMs, season, episode);
+    const r = await fetchDetail(needSource(byId, s.source), s, opts.vodId, timeoutMs, season, episode, pick);
     out.sites = [r];
     out.picked = { source: s.source, key: s.key, vodId: opts.vodId, matchedBy: 'given', sameNameCount: 1 };
     if (r.ok) out.stats.detailOk += 1; else out.stats.detailFailed += 1;
@@ -726,6 +767,8 @@ async function aggregateDetail(sources, sites, opts = {}) {
    *   `usableItems`= 其中**能用**的条数（`detailUsable`）—— 目标是凑够 `maxItems` 条。 */
   const needTarget = episode !== null && episode !== undefined;
   out.stats.needTarget = needTarget;
+  /* "这条详情能不能用"的判据跟着取法走：电影看**有没有播放项**，剧集看**有没有定位到这一集** */
+  const usableNeed = pick === 'items' ? 'item' : needTarget;
   const attempted = new Set();
   let usableItems = 0;
 
@@ -741,12 +784,12 @@ async function aggregateDetail(sources, sites, opts = {}) {
       const rep = (picked && sid(picked.source, picked.siteKey) === composite ? picked : null) || sameList[0] || (list[0] && list[0].item);
       if (!rep) return;
       // eslint-disable-next-line no-await-in-loop
-      const repR = await fetchDetail(src, s, rep.vod_id, timeoutMs, season, episode);
+      const repR = await fetchDetail(src, s, rep.vod_id, timeoutMs, season, episode, pick);
       repR.sameNameCount = sameList.length;
       repR.variantCount = list.length - sameList.length;
       if (repR.ok) out.stats.detailOk += 1; else out.stats.detailFailed += 1;
       attempted.add(String(rep.vod_id || ''));
-      if (detailUsable(repR.detail, needTarget)) usableItems += 1;
+      if (detailUsable(repR.detail, usableNeed)) usableItems += 1;
 
       /* 变体**各自**取详情，挂在该站的 `variants[]`（代表仍占 `detail`，不重复塞一遍 ——
        * 免得多变体时把最大的那块 `lines` 在响应里序列化两遍）。取不到的**如实不带**，不猜。 */
@@ -755,10 +798,10 @@ async function aggregateDetail(sources, sites, opts = {}) {
         const vs = await Promise.all(
           rest.map(async (x) => {
             // eslint-disable-next-line no-await-in-loop
-            const r = await fetchDetail(src, s, x.item.vod_id, timeoutMs, season, episode);
+            const r = await fetchDetail(src, s, x.item.vod_id, timeoutMs, season, episode, pick);
             if (r.ok) out.stats.detailOk += 1; else out.stats.detailFailed += 1;
             attempted.add(String(x.item.vod_id || ''));
-            if (detailUsable(r.detail, needTarget)) usableItems += 1;
+            if (detailUsable(r.detail, usableNeed)) usableItems += 1;
             if (!r.detail) return null;
             return {
               variant: true,
@@ -809,7 +852,7 @@ async function aggregateDetail(sources, sites, opts = {}) {
       attempted.add(String(cand.vod_id || ''));
       out.stats.extraTried = extraN;
       // eslint-disable-next-line no-await-in-loop
-      const r2 = await fetchDetail(needSource(byId, site0.source), site0, cand.vod_id, timeoutMs, season, episode);
+      const r2 = await fetchDetail(needSource(byId, site0.source), site0, cand.vod_id, timeoutMs, season, episode, pick);
       if (r2.ok) out.stats.detailOk += 1;
       else out.stats.detailFailed += 1;
       if (!r2.detail) continue;
@@ -832,7 +875,7 @@ async function aggregateDetail(sources, sites, opts = {}) {
         done.set(composite2, r2);
         if (!wanted.includes(composite2)) wanted.push(composite2);
       }
-      if (detailUsable(r2.detail, needTarget)) {
+      if (detailUsable(r2.detail, usableNeed)) {
         usableItems += 1;
         extraUsable += 1;
         out.stats.usableExtra = extraUsable;

@@ -189,6 +189,7 @@ function cacheableDetail(out) {
  *
  * `opts`：`name`（影视名）/ `year`（消歧）/ `season` + `episode`（定位某一集）/
  * `keys`（限定站点 `{source,key}[]`）/ `source`+`site`+`vodId`（快路径：已知绑定就直查，跳过搜索）/
+ * `pick`（取法：`items` = 电影，列出每条线路的**全部播放项**；缺省 = 剧集，按季集号定位一条）/
  * `minScore` + `maxItems`（打分阈值与"最多留几条"，不传就用 `agg.json` 里的设置）；
  * `extraK` / `extraAll`（接续补打：前 N 条没凑够时再往下试几条 / 匹配到底，不传读设置）。
  * **没有 `all`**：命中的站一律全取（见 service.aggregateDetail），
@@ -253,6 +254,8 @@ async function detail(opts = {}) {
       vodId,
       season: opts.season,
       episode: opts.episode,
+      /* 取法：`items` = 电影（每条线路列出全部播放项）；缺省 = 剧集（按季集号定位一条）。 */
+      pick: opts.pick,
       timeoutMs: opts.timeoutMs,
       minScore: opts.minScore,
       maxItems: opts.maxItems,

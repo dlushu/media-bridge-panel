@@ -1405,9 +1405,9 @@ async function getItem(itemId, requestedId, host = '') {
     };
   }
 
-  /* ---- ② 线路 + 源绑定：把影视名交给聚合层，一次拿回线路与「这一集」的定位 ---- */
-  /* 电影没有季集号：借聚合层的「第 1 季按选集序号」规则取**第一条播放项**（站源里电影就是一项，
-   * 即正片）—— 见 `wantLocator()` 那段说明。
+  /* ---- ② 线路 + 源绑定：把影视名交给聚合层，一次拿回线路与可播目标 ---- */
+  /* 电影没有季集号：取法用 `pick: 'items'` —— 聚合层把**每条线路的全部播放项**都列成目标
+   * （同一部片的多个压制版本各自成一个版本），见 `wantLocator()` 与 docs/adr/0022。
    * 名字 + 年份 + 季集就是全部输入：聚合层用它们**打分**挑片（`agg/match.js`）。
    * ⚠️ **不再把 tmdb 坐标传下去**（早期给"别名回退"用）：判据换成了本地打分，
    * 阈值与"最多留几条"都在聚合层的设置里，emby 这条链与 web 的聚合搜索**共用同一套**。 */
@@ -1488,38 +1488,50 @@ async function getItem(itemId, requestedId, host = '') {
        * 函数开头那个「拿到 TMDB 元数据后先判类型」的早返回已经把剧/季挡在聚合层之前了
        * （见 `getItem` 里那段说明）；留着是给以后新增类型时的保险。 */
       if (!isPlayable(found.Type)) continue;
+      /* 可播目标：**电影 = 该线路下的每个播放项**（多条压制版本各自成一个版本）；
+       * **剧集 = 定位到的这一集**。判据见 `wantLocator`（电影的 `pick: 'items'`）与
+       * agg 的 `fetchDetail` items 分支。 */
+      const movie = found.Type === 'Movie';
       for (const line of lines) {
         /* 线路过滤（`play.filter`）：**只匹配线路名**，不匹配的不进版本列表。
          * ⚠️ 它只影响"列出来的版本"，**不影响播放** —— `resolveStream` 按版本 Id 回查，不查这个列表。 */
         if (filter.re && !filter.re.test(line.flag)) continue;
         afterFilter += 1;
-        /* **没定位到这一集的线路不进版本列表**：列出来的版本，客户端点了就得能播 ——
-         * `resolveStream` 是按「线路 + 这一集」回查的，一条没定位到这一集的线路，点了必然 404。
-         * 实测：`斗破苍穹 S5E171` 的详情是「4 线路，1 条目定位到」，
+        /* **没有可播目标的线路不进版本列表**：列出来的版本，客户端点了就得能播 ——
+         * `resolveStream` 是按「线路 + 这一项」回查的，一条没有目标的线路，点了必然 404。
+         * 实测（剧集）：`斗破苍穹 S5E171` 的详情是「4 线路，1 条目定位到」，
          * 也就是 4 个版本里只有 1 个真能播；客户端挑了 huban 那条（集名是
          * `[743.2MB]180x.mp4【D斗P苍q 2026/ximg】`，解析不出集号 → 没定位到）→ 拉流 404。
-         * 面盘**不猜**集号，所以这种线路宁可不出现在列表里（如实"少给"），也不给一条死路。
+         * 面板**不猜**集号，所以这种线路宁可不出现在列表里（如实"少给"），也不给一条死路。
          * ⚠️ `totalLines` 不动 —— 日志里的"源里 N 条"说的是源里有多少，不是列出来多少。 */
-        if (!line.target) {
+        const targets = movie ? line.items || [] : line.target ? [line.target] : [];
+        if (!targets.length) {
           noTarget += 1;
           continue;
         }
-        /* 第一条版本**定位到的那个文件**的名字 = 条目级 `FileName` 的真来源
-         * （真机给的就是文件名 `10间敢死队.2026….mkv`；版本名是"站点 · 线路"，不是文件名）。 */
-        if (!firstFileName && line.target && line.target.name) firstFileName = String(line.target.name);
-        sources.push(
-          buildMediaSource({
-            itemId,
-            host,
-            source: entry.source,
-            siteKey,
-            siteLabel,
-            vodId: det.vodId,
-            line,
-            runtimeTicks: found.RunTimeTicks,
-            variantLabel: item.label || '',
-          })
-        );
+        /* 电影多版本：同一条线路下的各项要生成**互不相同**的短标签（规格优先，重了补项序号） */
+        const itemLabels = movie ? itemLabelsOf(targets) : [];
+        targets.forEach((t, i) => {
+          /* 第一条版本**那个文件**的名字 = 条目级 `FileName` 的真来源
+           * （真机给的就是文件名 `10间敢死队.2026….mkv`；版本名是"站点 · 线路"，不是文件名）。 */
+          if (!firstFileName && t.name) firstFileName = String(t.name);
+          sources.push(
+            buildMediaSource({
+              itemId,
+              host,
+              source: entry.source,
+              siteKey,
+              siteLabel,
+              vodId: det.vodId,
+              line,
+              runtimeTicks: found.RunTimeTicks,
+              variantLabel: item.label || '',
+              item: t,
+              itemIndex: movie ? i : 0,
+              itemLabel: itemLabels[i] || '',
+            })
+          );
+        });
       }
     }
     /* 诊断字段：老字段（单站那几个）取**第一条**（代表条目，兼容既有面板读取），
@@ -1590,7 +1602,12 @@ async function getItem(itemId, requestedId, host = '') {
    *   · 非可播类型（剧/季）**不展开版本列表**，那种 0 条是设计（曾被这句误导过一轮）；
    *   · 线路过滤（正则没匹配上）；
    *   · 没定位到这一集（集名里没有集号，面板不猜 → 那条线路不列）。 */
-  const noTargetNote = noTarget ? `（另有 ${noTarget} 条没定位到 ${locatorLabel(found.Type, p)}，不进版本列表）` : '';
+  /* 电影的一个"版本" = 线路 × 播放项，剧集 = 一条线路 —— 日志里分开说，免得把版本数读成线路数 */
+  const isMovie = found.Type === 'Movie';
+  const versionNote = isMovie ? `${sources.length} 个版本（${afterFilter} 条线路 × 播放项）` : `${sources.length} 线路`;
+  const noTargetNote = noTarget
+    ? `（另有 ${noTarget} 条线路${isMovie ? '没有播放项' : `没定位到 ${locatorLabel(found.Type, p)}`}，不进版本列表）`
+    : '';
   const filterNote =
     !isPlayable(found.Type)
       ? ` 非可播类型「${found.Type}」，按设计不给版本列表（源里 ${totalLines} 条线路）` /* 兜底：早返回之后正常走不到 */
@@ -1605,7 +1622,7 @@ async function getItem(itemId, requestedId, host = '') {
     body: found,
     log:
       `id=${itemId}「${name}」→ ${entries.length} 站命中（${entries.map((e) => `${e.source}/${e.key}`).join(' ')}）` +
-      ` ${sources.length} 线路，${located} 条目定位到 ${locatorLabel(found.Type, p)}` +
+      ` ${versionNote}，${located} 条目${isMovie ? '有播放项' : `定位到 ${locatorLabel(found.Type, p)}`}` +
       `${variantCount ? `，同片变体 ${variantCount} 条` : ''}` +
       `${specs ? ` 带规格=${specs}` : ''}${filterNote} ${hit.elapsedMs}ms`,
   };
@@ -1743,19 +1760,20 @@ const PLAY_HINT_TTL_MS = 30 * 60 * 1000;
 const PLAY_HINT_MAX = 500;
 const playHints = new Map();
 
-const playHintKey = (itemId, source, site, flag, vodId) =>
-  [itemId, source, site, flag, vodId].join('\u0001');
+/* key 里带 `i`（第几个播放项）：电影同一条线路下有多个版本，不带项序号会互相覆盖 —— 结果是"永远播第 1 项" */
+const playHintKey = (itemId, source, site, flag, vodId, itemIndex) =>
+  [itemId, source, site, flag, vodId, Number(itemIndex) || 0].join('\u0001');
 
-function rememberPlayHint(itemId, source, site, flag, vodId, episodeId) {
+function rememberPlayHint(itemId, source, site, flag, vodId, itemIndex, episodeId) {
   if (!episodeId) return;
-  playHints.set(playHintKey(itemId, source, site, flag, vodId), { episodeId: String(episodeId), at: Date.now() });
+  playHints.set(playHintKey(itemId, source, site, flag, vodId, itemIndex), { episodeId: String(episodeId), at: Date.now() });
   /* 超上限按插入顺序淘汰最旧的（Map 保序） */
   while (playHints.size > PLAY_HINT_MAX) playHints.delete(playHints.keys().next().value);
 }
 
 /** 取出备忘的集 id；过期即删。**取走不删** —— 同一集客户端会反复请求。 */
-function playHintOf(itemId, source, site, flag, vodId) {
-  const key = playHintKey(itemId, source, site, flag, vodId);
+function playHintOf(itemId, source, site, flag, vodId, itemIndex) {
+  const key = playHintKey(itemId, source, site, flag, vodId, itemIndex);
   const hit = playHints.get(key);
   if (!hit) return '';
   if (Date.now() - hit.at > PLAY_HINT_TTL_MS) {
@@ -1765,16 +1783,48 @@ function playHintOf(itemId, source, site, flag, vodId) {
   return hit.episodeId;
 }
 
-function buildMediaSource({ itemId, source, siteKey, siteLabel, vodId, line, runtimeTicks, variantLabel = '', host = '', headers = {} }) {
-  const src = catpawSourceId(source, siteKey, line.flag, vodId);
-  const t = line.target || {}; // 该线路**自己**定位到的那一集（含集名里源标的规格：容器/分辨率/编码/体积）
-  /* 记下这一集的播放 id：播放时就不必再取一次详情（见上面 playHintOf 那段）。 */
-  if (t.id) rememberPlayHint(itemId, source, siteKey, line.flag, vodId, t.id);
+/**
+ * 电影多版本时，版本行标题要能**区分**同一条线路下的各个播放项 —— 用源标的规格拼一句短标签。
+ * 读不出规格就返回空（调用方退回「第 N 项」，不编）。例：`5.0GB 1080p`。
+ */
+function itemSpecLabel(t) {
+  const bits = [];
+  if (t.sizeBytes) {
+    bits.push(t.sizeBytes >= 1024 ** 3 ? `${(t.sizeBytes / 1024 ** 3).toFixed(1)}GB` : `${Math.round(t.sizeBytes / 1024 ** 2)}MB`);
+  }
+  if (t.width && t.height) bits.push(t.height >= 2000 ? '4K' : `${t.height}p`);
+  return bits.join(' ');
+}
+
+/**
+ * 一条线路下**全部播放项**的短标签（电影专用）：规格互不相同就直接用规格；
+ * 有重复（同一部片的两个压制版本体积+分辨率一样）或读不出规格时，补 `· 第 N 项` 保证**互不相同** ——
+ * 标题撞名的后果是客户端里几条版本长得一模一样（同片变体已经踩过一次）。
+ */
+function itemLabelsOf(items) {
+  const specs = items.map((t) => itemSpecLabel(t));
+  const seen = new Set();
+  const dup = new Set();
+  for (const s of specs) {
+    if (!s || seen.has(s)) dup.add(s);
+    seen.add(s);
+  }
+  return specs.map((s, i) => (dup.has(s) ? `${s || '播放项'} · 第 ${i + 1} 项` : s));
+}
+
+function buildMediaSource({ itemId, source, siteKey, siteLabel, vodId, line, runtimeTicks, variantLabel = '', host = '', headers = {}, item, itemIndex = 0, itemLabel = '' }) {
+  const src = catpawSourceId(source, siteKey, line.flag, vodId, itemIndex);
+  /* 这个版本要播的那一项：电影 = 该线路下的**第 `itemIndex` 个播放项**；剧集 = **定位到的这一集**。
+   * 两者都带集名里源标的规格（容器/分辨率/编码/体积）。 */
+  const t = item || line.target || {};
+  /* 记下这一项的播放 id：播放时就不必再取一次详情（见上面 playHintOf 那段）。 */
+  if (t.id) rememberPlayHint(itemId, source, siteKey, line.flag, vodId, itemIndex, t.id);
   /* 站点标签用**完整 `name`**（`木偶|4K`）—— 带着 `|4K` 这类画质后缀，比截短的"木偶"信息更全；
    * 标题位与副标题（Path 末段）用**同一个标签**，两行格式统一。
    * 同片别名（`（臻彩）`/`（4K 偷跑）`）**必须**进标题位：同一部片的两个条目常常线路名完全一样
-   * （`虎斑|4K · 夸克原画` × 2），不加后缀又变成"分不清哪条是哪条"（同类问题已出现过）。 */
-  const title = `${siteLabel} · ${line.flag}${variantLabel ? ` · ${variantLabel}` : ''}`;
+   * （`虎斑|4K · 夸克原画` × 2），不加后缀又变成"分不清哪条是哪条"（同类问题已出现过）。
+   * 电影多版本（`itemLabel`）同理：同一条线路下挂着 4 个压制版本时，不加规格就是 4 行一模一样。 */
+  const title = `${siteLabel} · ${line.flag}${variantLabel ? ` · ${variantLabel}` : ''}${itemLabel ? ` · ${itemLabel}` : ''}`;
   const fileName = t.name || `${line.flag}.mkv`;
   /* Path 末段 = 版本行的**副标题**（客户端取「解码后最后一个 `/` 之后」，见 streamPath）：
    * 前面挂**站点来源标签**（站点的完整 `name`，如 `木偶|4K`）—— 多站之后副标题（集名）常常逐字
@@ -1890,9 +1940,9 @@ function buildMediaSource({ itemId, source, siteKey, siteLabel, vodId, line, run
  * （实测 Rex 打的是 `/videos/{ItemId}/stream.{Container}?MediaSourceId=…`，见 routes.js）。而拉流要
  * vod 才能走 detail 快路径（拿新鲜集 ID）—— 让 Id 自包含，播放链路就不看客户端的脸色。
  */
-function catpawSourceId(source, site, flag, vodId) {
-  /* 载荷 = 四个字段的 **JSON**（再整体 base64url）：
-   *   `{s: 源id, t: 站点key, f: 线路, v: vod}`
+function catpawSourceId(source, site, flag, vodId, itemIndex = 0) {
+  /* 载荷 = 五个字段的 **JSON**（再整体 base64url）：
+   *   `{s: 源id, t: 站点key, f: 线路, v: vod, i: 第几个播放项}`（`i = 0` 时**不写**）
    *
    * 为什么不是 `<源>:<站点>:<线路>|<vod>` 那种"分隔符拼串"：
    * **vod 里可能就有 `|`** —— 站源给 `vod_id` 塞 JSON 是常态，里面的 `vod_remarks`
@@ -1900,8 +1950,14 @@ function catpawSourceId(source, site, flag, vodId) {
    * 老写法按「最后一个 `|`」切 vod，于是一播就切成 `19天前"}}` → 聚合层查不到这条绑定 → 404，
    * 客户端表现为"这个视频点了没反应"。JSON 里字段边界是结构化的，`|`/`:`/`#` 一律不是问题。
    *
-   * 多源之后**必须带源**：否则拉流回查不知道去哪个源（同一站点 key 在多个源里都可能存在）。 */
-  const payload = JSON.stringify({ s: String(source || ''), t: String(site || ''), f: String(flag || ''), v: String(vodId || '') });
+   * 多源之后**必须带源**：否则拉流回查不知道去哪个源（同一站点 key 在多个源里都可能存在）。
+   *
+   * `i` 是**电影**多版本才需要的坐标（同一线路下挂了多个压制版本，客户端回传时靠它区分是哪一个）。
+   * `i = 0` 时不写进载荷 ⇒ **第 1 项的 Id 与改动前逐字相同**，客户端手里缓存的旧 Id 天然就是
+   * "第 1 项"，不需要单独的兼容分支（见 docs/adr/0022）。 */
+  const body = { s: String(source || ''), t: String(site || ''), f: String(flag || ''), v: String(vodId || '') };
+  if (Number(itemIndex) > 0) body.i = Number(itemIndex);
+  const payload = JSON.stringify(body);
   return 'catpaw:' + Buffer.from(payload, 'utf8').toString('base64url');
 }
 
@@ -1997,7 +2053,7 @@ function lineFilter() {
 
 /**
  * 拆版本 Id —— **三种形状都认**（老的两种是历史包袱：客户端可能缓存着旧 Id）：
- *   - **新**（当前发出的）：`catpaw:<base64url>`，解出来是 JSON `{s,t,f,v}`；
+ *   - **新**（当前发出的）：`catpaw:<base64url>`，解出来是 JSON `{s,t,f,v,i?}`；
  *   - 旧·带源：`catpaw:<源id>:<站点key>:<线路>[|<vod>]`（base64url 或明文）；
  *   - 旧·无源（多源之前）：`catpaw:<站点>:<线路>[|<vod>]` —— 多源下无法回查，上层报错让客户端重取。
  *
@@ -2006,6 +2062,9 @@ function lineFilter() {
  * 否则按旧形状的字段切法（`vod` 取最后一个 `|` 之后，`head` 按 `:` 切：
  * 2 段 = 旧·无源，≥3 段 = 旧·带源，线路名里可能还有冒号）。
  * 认不出回 `null` —— 上层据此报 400，不猜。
+ *
+ * **`i`（该线路下的第几个播放项）缺省 0**：改动前发出的 Id 里没有这个字段，缺省 0 就是"第 1 项"，
+ * 与那时的行为一致 —— 老 Id 因此天然可用（见 docs/adr/0022）。
  */
 function parseCatpawSourceId(src) {
   const s = String(src || '');
@@ -2021,7 +2080,7 @@ function parseCatpawSourceId(src) {
       const source = String(o.s || '');
       const site = String(o.t || '');
       if (!site) return null;
-      return { source, site, flag: String(o.f || ''), vod: String(o.v || '') };
+      return { source, site, flag: String(o.f || ''), vod: String(o.v || ''), i: Number(o.i) || 0 };
     } catch {
       return null;
     }
@@ -2032,8 +2091,9 @@ function parseCatpawSourceId(src) {
   const vod = bar >= 0 ? plain.slice(bar + 1) : '';
   const parts = head.split(':');
   if (parts.length < 2 || !parts[0] || !parts[1]) return null;
-  if (parts.length === 2) return { source: '', site: parts[0], flag: parts[1], vod }; // 旧形状（没有源）
-  return { source: parts[0], site: parts[1], flag: parts.slice(2).join(':'), vod };
+  /* 老的两种形状里也没有项序号 —— 同样按"第 1 项"处理（`i: 0`） */
+  if (parts.length === 2) return { source: '', site: parts[0], flag: parts[1], vod, i: 0 }; // 旧形状（没有源）
+  return { source: parts[0], site: parts[1], flag: parts.slice(2).join(':'), vod, i: 0 };
 }
 
 /**
@@ -2093,12 +2153,11 @@ function decodeSourceToken(token) {
 /**
  * 「可播类型」：**集**（Episode）与**电影**（Movie）。剧/季是容器 —— 给了客户端会以为能播。
  *
- * 电影为什么能直接吃这套：站源里电影就是「一条线路 + 一项播放地址」，与剧集**同构**，只是**没有季集号**。
- * 本层借聚合层 `locateEpisode()` 的「第 1 季按**选集序号**」规则取该线路的**第一条播放项**
- * （见 `wantLocator()`），于是 `Id` / `Path` / 拉流那一整条链路**一行都不用改**
- * （**聚合层不加新参数**）。
- * ⚠️ 代价如实记着：`target.matchedBy` 会是 `sequence`、`target` 里带 `season/episode: 1`；
- * 若某条线路把「预告」排在最前，就会取到预告 —— 不猜、不修，出问题再说。
+ * **电影 / 剧集两套取法**（见 docs/adr/0022）：
+ *   · 电影 —— `pick: 'items'`：每条线路的**每个播放项**各成一个版本（多个压制版本全都列出来），
+ *     版本 Id 里带 `i`（第几项）；
+ *   · 集   —— 按季集号定位**这一集**，版本 Id 里不带 `i`（缺省 0）。
+ * 两套取法共用同一条播放链路（`Id` → `Path` → `PlaybackInfo` → 拉流），差别只在"取到哪一项"。
  */
 const PLAYABLE_TYPES = new Set(['Episode', 'Movie']);
 function isPlayable(type) {
@@ -2111,15 +2170,19 @@ function isPlayableId(p) {
   return p.type === 'movie' ? p.season === null && p.episode === null : p.season !== null && p.episode !== null;
 }
 
-/** 交给聚合层的定位坐标：电影借「第 1 季第 1 集」取第一条播放项；集照实传季集号。 */
+/**
+ * 交给聚合层的**取法坐标**（电影/剧集两套取法，见 docs/adr/0022）：
+ *   · 电影 → `{ pick: 'items' }`：每条线路的**每个播放项**各算一个可播目标（多条压制版本各自成版本）；
+ *   · 集   → 照实传季集号：按集名里的集号定位**这一集**。
+ */
 function wantLocator(p) {
-  return p.type === 'movie' ? { season: 1, episode: 1 } : { season: p.season, episode: p.episode };
+  return p.type === 'movie' ? { pick: 'items' } : { season: p.season, episode: p.episode };
 }
 
-/** 日志里"定位到哪"：集写季集号；电影写「第 1 项（借 S1E1）」；其余如实写类型。 */
+/** 日志里"定位到哪"：集写季集号；电影写「按播放项」；其余如实写类型。 */
 function locatorLabel(type, p) {
   if (type === 'Episode') return `S${p.season}E${p.episode}`;
-  if (type === 'Movie') return '电影第 1 项（借 S1E1）';
+  if (type === 'Movie') return '电影（按播放项）';
   return `（非可播类型：${type}）`;
 }
 
@@ -2206,7 +2269,9 @@ async function resolveStream(itemId, src, vodParam, requestedId, clientHost) {
   /* ---- 快路径：版本列表里已经记下了这一集的播放 id，直接取地址 ----
    * 命中且这次能拿到地址就用它（省掉下面那次详情）；否则落回常规路径 ——
    * 备忘录只影响快慢，不影响对错（见 playHintOf 那段）。 */
-  const hinted = playHintOf(itemId, parsed.source, parsed.site, parsed.flag, vodId);
+  /* `i` = 该线路下的第几个播放项（电影多版本用；缺省 0 = 第 1 项，老 Id 天然落在这里） */
+  const itemIndex = Number(parsed.i) || 0;
+  const hinted = playHintOf(itemId, parsed.source, parsed.site, parsed.flag, vodId, itemIndex);
   if (hinted) {
     const pr0 = await agg.play({ source: parsed.source, site: parsed.site, flag: parsed.flag, episodeId: hinted });
     if (pr0.ok && (((pr0.play || {}).urls) || []).length) {
@@ -2217,8 +2282,8 @@ async function resolveStream(itemId, src, vodParam, requestedId, clientHost) {
     );
   }
 
-  /* 电影同样借「第 1 季第 1 集」取第一条播放项 —— 与 getItem 那条链路用**同一套坐标**
-   * （`wantLocator`），否则 PlaybackInfo 给的版本和这里定位到的会不是同一项。 */
+  /* 与 `getItem` 那条链路用**同一套取法坐标**（`wantLocator`）：电影 = 该线路的全部播放项、
+   * 集 = 这一集。否则 PlaybackInfo 给的版本和这里取到的会不是同一项。 */
   const hit = await agg.detail(Object.assign({ source: parsed.source, site: parsed.site, vodId }, wantLocator(p)));
   if (!hit.ok) {
     /* 照旧一律 502（"上游取不到数"）：换进程内直调后 code/message 才真的有意义，那就写进 body 与日志，
@@ -2258,16 +2323,22 @@ async function resolveStream(itemId, src, vodParam, requestedId, clientHost) {
       log: `站源里没有线路「${parsed.flag}」→ 404（源里现有：${(det.lines || []).map((l) => l.flag).join(' / ') || '无'}）`,
     };
   }
-  if (!line.target) {
-    const label = locatorLabel(p.type === 'movie' ? 'Movie' : 'Episode', p);
+  /* 这个版本要播的目标：**电影 = 这条线路下的第 `itemIndex` 个播放项**（项序号来自 Id，缺省 0 = 第 1 项，
+   * 老 Id 天然落在这里）；**剧集 = 定位到的这一集**。与 `getItem` 拼版本列表时**同一口径**，
+   * 否则会出现"版本列出来了、点了 404"。 */
+  const isMovie = p.type === 'movie';
+  const item = isMovie ? (line.items || [])[itemIndex] || (line.items || [])[0] : line.target;
+  if (!item) {
+    const label = locatorLabel(isMovie ? 'Movie' : 'Episode', p);
+    const what = isMovie ? '播放项' : `这一集（${label}）`;
     return {
       status: 404,
-      body: { error: det.targetNote || `这条线路「${line.flag}」里定位不到 ${label}` },
-      log: `定位不到 ${label}（线路「${line.flag}」）→ 404`,
+      body: { error: det.targetNote || `这条线路「${line.flag}」里没有可播的${what}` },
+      log: `线路「${line.flag}」没有${what} → 404`,
     };
   }
 
-  const pr = await agg.play({ source: parsed.source, site: parsed.site, flag: parsed.flag, episodeId: line.target.id });
+  const pr = await agg.play({ source: parsed.source, site: parsed.site, flag: parsed.flag, episodeId: item.id });
   if (!pr.ok) {
     const e = pr.error || {};
     return {
@@ -2277,7 +2348,7 @@ async function resolveStream(itemId, src, vodParam, requestedId, clientHost) {
     };
   }
 
-  return finishStream({ p, parsed, pr, clientHost, matchedBy: (det.target || {}).matchedBy });
+  return finishStream({ p, parsed, pr, clientHost, matchedBy: item.matchedBy });
 }
 
 /**
