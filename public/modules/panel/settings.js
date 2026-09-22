@@ -11,7 +11,7 @@
  *                    端点 `GET|DELETE /api/panel/cache`，策略存 `panel.json` 的 `cache.*`（见 core/cachedb.js）
  *   · 面板密码        改密码（见 core/auth.js）+ 退出登录
  */
-import { el, toast, fmtTime } from '../../core/dom.js';
+import { el, toast, fmtTime, codeBlock } from '../../core/dom.js';
 import { api } from '../../core/api.js';
 import { S } from '../../core/state.js';
 import { authStatus, changePassword, logout } from '../../core/auth.js';
@@ -67,6 +67,8 @@ function updateCard() {
   const install = el('button', { class: 'btn primary hidden' });
   const result = el('div', { class: 'hint' });
   const versions = el('div', { class: 'note' });
+  /* 有新版本时在这里显示该版本的更新内容（Release 说明 = CHANGELOG 里那一节） */
+  const notesBox = el('div', { class: 'hidden' });
   let last = null; // 最近一次 GET /api/panel/update 的结果
 
   const showResult = (cls, lines) => {
@@ -107,6 +109,33 @@ function updateCard() {
       lines.push('检查更新失败：' + r.error);
     }
     showResult(cls, lines);
+
+    /* 有新版本 → 顺带把"这次更新会带来什么"显示出来（说明取自 Release，即 CHANGELOG 里那一节）。
+     * 该版本没写说明时**如实说一句**，不留白 —— 否则看着像前端忘了显示。 */
+    notesBox.replaceChildren();
+    const showNotes = hasNew && !!(r.notes || r.notesUrl);
+    notesBox.classList.toggle('hidden', !showNotes);
+    if (showNotes) {
+      if (r.notes) {
+        notesBox.append(
+          codeBlock({
+            label: `更新内容 · ${r.latest}${r.publishedAt ? ` · 发布 ${fmtTime(r.publishedAt)}` : ''}`,
+            code: r.notes,
+          })
+        );
+      } else {
+        notesBox.append(el('div', { class: 'note', text: `这个版本（${r.latest}）的 Release 没有写更新说明。` }));
+      }
+      if (r.notesUrl) {
+        notesBox.append(
+          el(
+            'div',
+            { class: 'note' },
+            el('a', { href: r.notesUrl, target: '_blank', rel: 'noreferrer', text: '在 GitHub 上打开这个 Release' })
+          )
+        );
+      }
+    }
   };
 
   const load = async (loud) => {
@@ -177,7 +206,8 @@ function updateCard() {
     el('div', { class: 'kv' }, el('span', { class: 'k', text: '运行方式' }), mode),
     el('div', { class: 'row' }, check, install),
     result,
-    versions
+    versions,
+    notesBox
   );
   load(false);
   return card;

@@ -227,8 +227,32 @@ function checksumUrlOf(version, name) {
   return tpl ? renderTemplate(tpl, { version, name }) : `${src}.sha256`;
 }
 
-/** 查最新 Release 的版本号（带 60 秒缓存；失败不缓存） */
-async function resolveLatest({ force = false } = {}) {
+/** 更新说明最多回给前端多少字符（Release 说明一般几 KB；上限只为挡住某个版本写了超长正文） */
+const NOTES_MAX = 20000;
+
+/**
+ * 清掉 Release 说明里的两段**模板套话**（由 `.github/workflows/release.yml` 拼上去，不是 CHANGELOG 正文）：
+ * 开头那句"发布说明摘自 …"、结尾 `---` 之后的"面板「设置 → 版本与更新」…"。
+ *
+ * 两个锚点都按**完整前缀**匹配，匹配不到就**原样保留** —— 宁可多显示一句套话，也不猜着切正文。
+ */
+function cleanNotes(body) {
+  let s = String(body || '').replace(/\r\n/g, '\n').trim();
+  s = s.replace(/^发布说明摘自 [^\n]*\n+/, '');
+  s = s.replace(/\n+---\n面板「设置 → 版本与更新」[\s\S]*$/, '');
+  s = s.trim();
+  if (s.length > NOTES_MAX) s = s.slice(0, NOTES_MAX) + '\n…（更新说明过长已截断，完整内容见 Release 页面）';
+  return s;
+}
+
+/**
+ * 查最新 Release 的**版本号 + 更新说明**（带 60 秒缓存；失败不缓存）。
+ *
+ * 更新说明取 Release 的 `body` —— 发布工作流把 CHANGELOG 里该版本那一节整段放进去
+ * （见 `.github/workflows/release.yml` 的"摘出发布说明"一步），所以面板里显示的就是"这次改了什么"。
+ * 另带 `html_url`（Release 页面）与 `published_at`（发布时间）。
+ */
+async function resolveLatestInfo({ force = false } = {}) {
   const now = Date.now();
   if (!force && checkCache.value && now - checkCache.at < CHECK_TTL_MS) return checkCache.value;
   const url = `https://api.github.com/repos/${REPO}/releases/latest`;
@@ -239,8 +263,19 @@ async function resolveLatest({ force = false } = {}) {
   const data = await res.json();
   const v = String(data.tag_name || '').replace(/^v/, '');
   if (!isValidVersion(v)) throw new Error(`最新 Release 的 tag 不是版本号：${data.tag_name}`);
-  checkCache = { at: now, value: v };
-  return v;
+  const info = {
+    version: v,
+    notes: cleanNotes(data.body),
+    notesUrl: String(data.html_url || `https://github.com/${REPO}/releases/tag/v${v}`),
+    publishedAt: String(data.published_at || ''),
+  };
+  checkCache = { at: now, value: info };
+  return info;
+}
+
+/** 只要版本号（`install()` 那条路用） */
+async function resolveLatest(opts) {
+  return (await resolveLatestInfo(opts)).version;
 }
 
 /* ------------------------------------------------------------------ 安装 */
@@ -361,13 +396,20 @@ async function status({ force = false } = {}) {
     runningDir: runningDir(),
     installed,
     previous: lower.length ? lower[lower.length - 1] : null,
+    /* 更新说明：前端只在"有新版本"时展示（内容来自 Release 的 body，见 resolveLatestInfo） */
+    notes: '',
+    notesUrl: '',
+    publishedAt: '',
     error: null,
   };
 
   try {
-    const latest = await resolveLatest({ force });
-    out.latest = latest;
-    out.hasUpdate = compareVersion(latest, current) > 0;
+    const info = await resolveLatestInfo({ force });
+    out.latest = info.version;
+    out.hasUpdate = compareVersion(info.version, current) > 0;
+    out.notes = info.notes;
+    out.notesUrl = info.notesUrl;
+    out.publishedAt = info.publishedAt;
   } catch (e) {
     out.error = (e && e.message) || String(e);
   }
@@ -379,6 +421,7 @@ module.exports = {
   install,
   requestRestart,
   resolveLatest,
+  resolveLatestInfo,
   isManaged,
   listInstalled,
   /* 清理：`pruneOnBoot` 是 `server.js` 启动成功后调的那个；`pruneVersions` 供排障与自测直接调用 */
