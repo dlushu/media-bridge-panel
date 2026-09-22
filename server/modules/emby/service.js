@@ -1685,9 +1685,12 @@ function aspectRatioOf(w, h) {
  * **直连播放地址**（`MediaSources[].DirectStreamUrl`）—— 真机**只在 PlaybackInfo 里给**，详情里没有
  * （拿真机同一集 `S05E211` 逐字段对过：详情 27 个字段、PlaybackInfo 28 个，差的就是它）。
  *
- * 形状照真机：`…/videos/{id}/stream?MediaSourceId=…&X-Emby-Token=…&Static=true`。两点刻意：
+ * 形状照真机：`…/videos/{id}/stream?MediaSourceId=…&api_key=…&Static=true`。两点刻意：
  *   · 给**绝对** URL —— 本面板发出去的 `Path` 就是绝对的，绝对地址在任何解析规则（按 base 拼还是按 host 拼）下都不会错；
  *   · 带上**客户端自己的 token** —— 本层的流端点要校验 AccessToken，不带就是 401（那比不给更糟）。
+ *     ⚠️ 用 query 里的 `api_key`，**不能写 `X-Emby-Token`**：后者本层只认请求头，
+ *     写进 query 等于没带（拿这个 URL 直接去播就是 401 —— 客户端自己会带头所以看不出来，
+ *     但把 URL 交给外部播放器/投屏时就会踩到）。`api_key` 这个 query 形式真机也认。
  *
  * ⚠️ 真机 PlaybackInfo 里它还是**相对路径**（`/videos/...`），这里给绝对的 —— 同理：只多不少、不会解析错。
  */
@@ -1697,13 +1700,56 @@ function directStreamUrl({ itemId, host, token, src, container }) {
   return (
     `http://${host}/api/emby/videos/${encodeURIComponent(itemId)}/${file}` +
     `?MediaSourceId=${encodeURIComponent(src)}&Static=true` +
-    (token ? `&X-Emby-Token=${encodeURIComponent(token)}` : '')
+    (token ? `&api_key=${encodeURIComponent(token)}` : '')
   );
+}
+
+/* ---------------------------------------------------------------- 播放快路径备忘 */
+
+/**
+ * **播放快路径备忘**：构建版本列表时，本层其实**已经知道**"这一集在源里的播放 id"（`line.target.id`），
+ * 而播放时却要为此再取一次源详情 —— 实测那次详情约 2 秒，而源自己的 `/play` 只要 0.07 秒。
+ *
+ * 为什么**不把它编进 `MediaSourceId`**：那个 id 又长又只对一条线路有效（夸克类 ≈460 字符），
+ * 编进去会让客户端要访问的 URL 涨到 700 字符上下。客户端与中间代理对 URL 长度的容忍度未知，
+ * 一旦被截断就是"点了播不了"，比慢两秒糟得多。
+ *
+ * 所以改为**服务端记住**：key = `(条目 Id, 源, 站点, 线路, vod)` → 集 id。
+ *   · 命中 → 直接调 `/play`，省掉那次详情；
+ *   · 未命中（面板重启、过期、换了源）→ 照旧取详情，**行为与没有这条备忘时完全一致**，只是慢。
+ * 因此这条备忘只影响快慢，不影响对错。
+ */
+const PLAY_HINT_TTL_MS = 30 * 60 * 1000;
+const PLAY_HINT_MAX = 500;
+const playHints = new Map();
+
+const playHintKey = (itemId, source, site, flag, vodId) =>
+  [itemId, source, site, flag, vodId].join('\u0001');
+
+function rememberPlayHint(itemId, source, site, flag, vodId, episodeId) {
+  if (!episodeId) return;
+  playHints.set(playHintKey(itemId, source, site, flag, vodId), { episodeId: String(episodeId), at: Date.now() });
+  /* 超上限按插入顺序淘汰最旧的（Map 保序） */
+  while (playHints.size > PLAY_HINT_MAX) playHints.delete(playHints.keys().next().value);
+}
+
+/** 取出备忘的集 id；过期即删。**取走不删** —— 同一集客户端会反复请求。 */
+function playHintOf(itemId, source, site, flag, vodId) {
+  const key = playHintKey(itemId, source, site, flag, vodId);
+  const hit = playHints.get(key);
+  if (!hit) return '';
+  if (Date.now() - hit.at > PLAY_HINT_TTL_MS) {
+    playHints.delete(key);
+    return '';
+  }
+  return hit.episodeId;
 }
 
 function buildMediaSource({ itemId, source, siteKey, siteLabel, vodId, line, runtimeTicks, variantLabel = '', host = '', headers = {} }) {
   const src = catpawSourceId(source, siteKey, line.flag, vodId);
   const t = line.target || {}; // 该线路**自己**定位到的那一集（含集名里源标的规格：容器/分辨率/编码/体积）
+  /* 记下这一集的播放 id：播放时就不必再取一次详情（见上面 playHintOf 那段）。 */
+  if (t.id) rememberPlayHint(itemId, source, siteKey, line.flag, vodId, t.id);
   /* 站点标签用**完整 `name`**（`木偶|4K`）—— 带着 `|4K` 这类画质后缀，比截短的"木偶"信息更全；
    * 标题位与副标题（Path 末段）用**同一个标签**，两行格式统一。
    * 同片别名（`（臻彩）`/`（4K 偷跑）`）**必须**进标题位：同一部片的两个条目常常线路名完全一样
@@ -2136,6 +2182,21 @@ async function resolveStream(itemId, src, vodParam, requestedId, clientHost) {
   }
 
   const where = `${parsed.source}/${parsed.site}`;
+
+  /* ---- 快路径：版本列表里已经记下了这一集的播放 id，直接取地址 ----
+   * 命中且这次能拿到地址就用它（省掉下面那次详情）；否则落回常规路径 ——
+   * 备忘录只影响快慢，不影响对错（见 playHintOf 那段）。 */
+  const hinted = playHintOf(itemId, parsed.source, parsed.site, parsed.flag, vodId);
+  if (hinted) {
+    const pr0 = await agg.play({ source: parsed.source, site: parsed.site, flag: parsed.flag, episodeId: hinted });
+    if (pr0.ok && (((pr0.play || {}).urls) || []).length) {
+      return finishStream({ p, parsed, pr: pr0, clientHost, matchedBy: '列表备忘' });
+    }
+    console.log(
+      `  ↻ emby 拉流快路径没成（${(pr0.error && pr0.error.code) || '源没给地址'}），改走"取详情"那条路`
+    );
+  }
+
   /* 电影同样借「第 1 季第 1 集」取第一条播放项 —— 与 getItem 那条链路用**同一套坐标**
    * （`wantLocator`），否则 PlaybackInfo 给的版本和这里定位到的会不是同一项。 */
   const hit = await agg.detail(Object.assign({ source: parsed.source, site: parsed.site, vodId }, wantLocator(p)));
@@ -2196,6 +2257,14 @@ async function resolveStream(itemId, src, vodParam, requestedId, clientHost) {
     };
   }
 
+  return finishStream({ p, parsed, pr, clientHost, matchedBy: (det.target || {}).matchedBy });
+}
+
+/**
+ * 拉流的**共同尾段**：拿到 `{urls, header, parse}` 之后怎么跳 ——
+ * 回环地址改写、请求头提醒、日志口径都只此一处（快路径与常规路径共用，免得两边慢慢分叉）。
+ */
+function finishStream({ p, parsed, pr, clientHost, matchedBy }) {
   const play = pr.play || {};
   const url = (play.urls || [])[0] || '';
   const headers = play.header || {};
@@ -2211,7 +2280,6 @@ async function resolveStream(itemId, src, vodParam, requestedId, clientHost) {
   }
 
   /* 一律 302（`play.mode` 与面板代理那条路已删，见上面 `redirectUrl()` 那段）。 */
-  const tgt = det.target;
   /* 这条站点的源是不是**本地部署**的（是的话，源回的地址得改写成客户端够得着的域名）；
    * 顺带拿走它的端口。`pr.sources` 是聚合层这次实际打的源清单（含 deployed/port）。 */
   const srcRow = (pr.sources || []).find((s) => s && s.id === parsed.source) || null;
@@ -2226,7 +2294,7 @@ async function resolveStream(itemId, src, vodParam, requestedId, clientHost) {
      * 「非可播类型：tv」这种误导日志（早期一直这么打）。 */
     log:
       `${locatorLabel(p.type === 'movie' ? 'Movie' : 'Episode', p)} ${parsed.source}/${parsed.site}/${parsed.flag}` +
-      ` target=${tgt.matchedBy} parse=${play.parse} → 302` +
+      ` target=${matchedBy} parse=${play.parse} → 302` +
       (red.rewrote ? ` 地址改写 ${srcRow.url} → 客户端域名(${clientHostName(clientHost)}:${srcRow.port})` : '') +
       (red.note ? `（${red.note}）` : '') +
       headerNote,
