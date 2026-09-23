@@ -15,7 +15,7 @@
  *     （core 的 `data/cache/tmdb.db` + 这里的 `data/emby/cache.db`），用量/清空/淘汰
  *     得一把抓两个，放在面板层才不会"面板管一半、模块管一半"。
  */
-import { el, toast, modal, fmtTime } from '../../core/dom.js';
+import { el, toast, modal, fmtTime, copy } from '../../core/dom.js';
 import { api } from '../../core/api.js';
 import { S } from '../../core/state.js';
 import { renderPage } from '../../core/shell.js';
@@ -213,6 +213,34 @@ export async function renderEmbySetup(v) {
     el('div', { class: 'row' }, nameInput, nameBtn)
   );
 
-  v.append(serverNameCard, accountCard);
+  /* ---- 客户端怎么连：把要填的地址写在这一页（README 那份是给还没进来的人看的）----
+   * 只显示**主机**（协议+主机+端口，就是这个页面的地址），不列别的网卡、不加别的后缀 ——
+   * 它一定通（否则这页都打不开）。客户端会自己去打 `/emby/...`，面板两种前缀都收
+   * （`/emby/**` 会被归一成 `/api/emby/**`，见 server.js 顶部那段）。 */
+  const connectUrl = (() => {
+    const u = new URL(location.href);
+    return u.origin;
+  })();
+  const connectCard = el(
+    'div',
+    { class: 'card' },
+    el('h3', { text: '客户端怎么连' }),
+    el('p', {
+      class: 'note',
+      text: 'Emby 客户端「添加服务器 / 添加媒体服务器」时，地址填这个；账号密码用下面「账号管理」里建的那个，服务器名见再下面那张卡。',
+    }),
+    el(
+      'div',
+      { class: 'row' },
+      el('code', { text: connectUrl }),
+      el('button', { class: 'btn mini', text: '复制', onclick: () => copy(connectUrl) })
+    ),
+    el('p', {
+      class: 'note',
+      text: '就填主机（客户端自己会补 `/emby`，面板两种都收）。如果哪个客户端死活连不上，把地址换成它后面加 `/api/emby` 再试。另外 9988-9998 是「源托管」里那些源实例用的，客户端不用管。',
+    })
+  );
+
+  v.append(connectCard, serverNameCard, accountCard);
 }
 

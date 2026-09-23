@@ -64,7 +64,25 @@ logbus.resize(panel.logMax);
 
 const server = http.createServer(async (req, res) => {
   const parsed = new URL(req.url, 'http://127.0.0.1');
-  const pathname = decodeURIComponent(parsed.pathname);
+  let pathname = decodeURIComponent(parsed.pathname);
+
+  /* Emby 兼容端点的**前缀归一化** —— 让"只填主机"和"填完整路径"两种配法都能用。
+   *
+   * 真机 Emby 把 API 挂在 `/emby/` 下，而本面板挂在 `/api/emby`。客户端的行为是
+   * **给的主机没带 `/emby` 就自己补一层**（文档里那条真机样例：给的是裸域名，它打的是 `/emby/Shows/…`），
+   * 所以只填 `http://<面板地址>:8099` 时它来的是 `/emby/...` —— 以前这里没路由，直接 404。
+   * 这里统一成规范形态（`/api/emby/...`），三种填法于是都通：
+   *
+   *   `/emby/xxx`            → `/api/emby/xxx`    （只填主机，或填了 `…/emby`）
+   *   `/api/emby/emby/xxx`   → `/api/emby/xxx`    （填了 `…/api/emby` 的客户端又多补了一层）
+   *
+   * 只动这两个前缀；`/api/agg`、静态文件、`/website` 等一律原样。写法放在最前面是为了
+   * "进门禁与路由时路径已经是规范形态"，免得后面按前缀判断的地方各判一套。 */
+  if (pathname === '/emby' || pathname.startsWith('/emby/')) {
+    pathname = '/api/emby' + pathname.slice('/emby'.length);
+  } else if (pathname === '/api/emby/emby' || pathname.startsWith('/api/emby/emby/')) {
+    pathname = '/api/emby' + pathname.slice('/api/emby/emby'.length);
+  }
 
   try {
     // 面板接口（各模块注册的路由）+ 配置中心同源代理

@@ -64,7 +64,20 @@ export function renderAgg(v) {
   );
   const maxItemsInput = numInput('aggMaxItems', defaults.maxItems, 1, 20, '最多留几条命中（想要几条能用的）。每多留一条，后面要多打一次站源 /detail 取链（多 = 慢）', 'w-md');
 
-  const num = (inp) => (inp.value === '' ? undefined : inp.value);
+  /**
+   * 输入框取值 → 数字（留空 = 不传这一项）。
+   *
+   * ⚠️ **必须转成数字**：`input.value` 拿到的是**字符串**，而判季号用的是严格相等
+   * （见 match.js 的 `want.season === sig.season`）—— 发 `season: "1"` 会被判成"季不同"，
+   * 所有条目季集分归 0、全体掉到 0.739 被分数线淘汰（实测：页面上填了「季」就一条都不命中）。
+   * 数字解析不出来（如 `-`、`1e`）按"没填"处理，别把 `NaN` 传下去。
+   */
+  const num = (inp) => {
+    const raw = String(inp.value === undefined || inp.value === null ? '' : inp.value).trim();
+    if (raw === '') return undefined;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : undefined;
+  };
 
   async function run() {
     const wd = wdInput.value.trim();

@@ -120,6 +120,48 @@ function isoDate(d) {
  * 这里只留一个别名，`lookup()` / `lookupSeason()` 的调用点不变。 */
 const requestCached = tmdbCore.requestCached;
 
+/** 汉字（含扩展 A 区与兼容区）—— 用来判"这个标题到底是不是中文的" */
+const CJK_RE = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/;
+
+/**
+ * **给聚合层搜索用的标题**：主标题没有中文时，回退到中文别名。
+ *
+ * 起因（实测 tv/95396 = 人生切割术）：TMDB 的 `zh-CN` **主标题就是英文 "Severance"**，
+ * 中文只登记在 `alternative_titles` 里（`人生切割术(CN)`）。而聚合层是拿这个名字去源里搜的 ——
+ * 英文名搜出来的中文名条目在**名字硬闸**那关就被拒（LCS=0，中英文没有公共主干），
+ * 于是命中源里的空壳条目、客户端一个版本都拿不到。
+ *
+ * 规则（用户定的）：
+ *   ① 语言设置不是中文系 → 不折腾，用主标题；
+ *   ② 主标题里已经有汉字 → 那就是中文的，用主标题；
+ *   ③ 否则问一次 `/alternative_titles`，取**带汉字**的那条：优先简体地区（CN/SG），再港澳台；
+ *   ④ 别名也全是英文（或取不到）→ 保持主标题。
+ *
+ * 只影响"拿什么名字去源里搜"，**不影响显示给客户端的名字**（客户端仍旧看主标题）。
+ * 那次别名请求走 `requestCached`（`/alternative_titles` 已在 META_PATH_RE 里），不会每次详情都打 TMDB。
+ */
+async function searchTitleOf({ kind, id, c, headers, main }) {
+  const title = String(main || '');
+  if (!/^zh/i.test(String(c.language || ''))) return title;
+  if (CJK_RE.test(title)) return title;
+  try {
+    const r = await requestCached(c.apiBase, `/${kind}/${id}/alternative_titles`, { headers, timeout: TIMEOUT_MS });
+    const rows = (r.ok && r.json && r.json.results) || [];
+    const zh = rows
+      .filter((x) => x && CJK_RE.test(String(x.title || '')))
+      .map((x) => ({ title: String(x.title).trim(), region: String(x.iso_3166_1 || '').toUpperCase() }))
+      .filter((x) => x.title);
+    if (!zh.length) return title;
+    /* 简体地区优先（源里的条目名绝大多数是简体），再港澳台，最后其余地区 */
+    const rank = (region) => (region === 'CN' || region === 'SG' ? 0 : region === 'TW' || region === 'HK' ? 1 : 2);
+    zh.sort((a, b) => rank(a.region) - rank(b.region));
+    return zh[0].title;
+  } catch {
+    /* 别名取不到就当没有 —— 这条路只是"名字更容易对上"，失败不该影响详情本身 */
+    return title;
+  }
+}
+
 /**
  * 反查一个 tmdb id —— 单一实现，`test()` 与 Emby 各端点都走这里。
  * 不抛异常：{ ok: true, item } 或 { ok: false, error: {code,status?,message} }
@@ -178,6 +220,10 @@ async function lookup({ type = 'tv', tmdbId, cfg, withSeasons = false, rich = fa
     seasonCount: Number(j.number_of_seasons) || 0,
     communityRating: Number(j.vote_average) || 0,
   };
+
+  /* 拿什么名字去源里搜：主标题没中文时回退中文别名（规则与原因见 searchTitleOf）。
+   * 它与 `title`（显示给客户端的名字）**分开**：客户端还是看主标题。 */
+  item.searchTitle = await searchTitleOf({ kind, id, c, headers, main: item.title });
 
   /* `rich`：详情页要的那一批（标语/时长/分级/演职/公司/关键词/预告/图集/相似），
    * 全部来自**同一次请求**的 append 结果，不额外打 TMDB。 */

@@ -1785,7 +1785,8 @@ async function tmdbItemDto(type, tmdbId) {
    * 电影必须显式改掉，否则客户端可能当目录去浏览而不是打开详情。 */
   item.IsFolder = type === 'tv';
   applyRich(item, got);
-  return { ok: true, item };
+  /* 交给调用方的"搜源用名字"：主标题没中文时已在 lookup 里回退成中文别名（见 emby/tmdb.js） */
+  return { ok: true, item, searchTitle: got.searchTitle || got.title };
 }
 
 /**
@@ -1856,10 +1857,13 @@ async function getItem(itemId, requestedId, host = '') {
       if (out.status !== 200) return out;
       found = (out.body.Items || []).find((i) => i.Id === itemId);
     }
-    /* 集/季两条列表都不含剧名，而搜索关键词要的就是剧名 → 这里必须问一次剧 */
+    /* 集/季两条列表都不含剧名，而搜索关键词要的就是剧名 → 这里必须问一次剧。
+     * ⚠️ 搜源用的是 `searchTitle`（主标题没中文时回退中文别名），**不是** `title`：
+     * 客户端看到的仍是被 TMDB 标成主标题的那个名字，但拿它去源里搜会一条都对不上
+     * （见 emby/tmdb.js 的 searchTitleOf）。 */
     const show = await tmdb.lookup({ type: 'tv', tmdbId: p.tmdbId });
     if (!show.ok) return tmdbFailure(show.error, `tv/${p.tmdbId}`);
-    name = show.item.title;
+    name = show.item.searchTitle || show.item.title;
     year = show.item.year;
   } else {
     /* 剧 / 影：**直接按 tmdb 坐标反查**（rich 版）——
@@ -1870,7 +1874,8 @@ async function getItem(itemId, requestedId, host = '') {
     const look = await tmdbItemDto(p.type, p.tmdbId);
     if (!look.ok) return tmdbFailure(look.error, `${p.type}/${p.tmdbId}`);
     found = look.item;
-    name = found.Name;
+    /* 同上面那条：搜源用 `searchTitle`（可能回退成中文别名），显示名仍旧是 `found.Name` */
+    name = look.searchTitle || found.Name;
     year = found.ProductionYear ? String(found.ProductionYear) : '';
   }
 

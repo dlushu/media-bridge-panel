@@ -134,15 +134,17 @@ function buildTarget(path, params, language) {
 
 /**
  * **只缓存"元数据类"路径** —— 判据是**请求的性质**，不是"谁问的"：
- *   会缓存：`/movie/{数字}`、`/tv/{数字}`、`/tv/{数字}/season/{数字}`
+ *   会缓存：`/movie/{数字}`、`/tv/{数字}`、`/tv/{数字}/season/{数字}`、`/{movie|tv}/{数字}/alternative_titles`
  *   不缓存：榜单/搜索/发现（`/trending/*`、`/movie/top_rated`、`/discover`、`/search`…）
  *   不缓存：`/configuration`（连通性测试 —— 它存在的意义就是测**当下**通不通，缓存即失去意义）
  *
  * 所以插件经 `Catpaw.tmdb.get` 问同一部片的元数据也享受缓存，而榜单仍归模块自己管
  * （插件已有 `cacheDuration`）。
  * ⚠️ 「数字」这个约束很关键：`/movie/top_rated` 也长得像 `/movie/xxx`，只有限定纯数字才不会把它卷进来。
+ * ⚠️ `alternative_titles`（别名表）**必须一起缓存**：它是"主标题没中文时回退别名"要问的接口，
+ * 一部剧的别名不会天天变，不缓存等于每次详情都多打一次 TMDB（见 emby/tmdb.js 的 `searchTitleOf`）。
  */
-const META_PATH_RE = /^\/(?:movie|tv)\/\d+(?:\/season\/\d+)?$/;
+const META_PATH_RE = /^\/(?:movie|tv)\/\d+(?:\/(?:season\/\d+|alternative_titles))?$/;
 
 function isMetaPath(target) {
   return META_PATH_RE.test(String(target || '').split('?')[0]);

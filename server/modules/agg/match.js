@@ -262,6 +262,31 @@ function yearScore(wantYear, sig) {
 const W = { name: 0.7, ep: 0.2, year: 0.1 };
 
 /**
+ * 把 `want` 的数字项归一化成数字。
+ *
+ * **调用方可能给字符串**：网页输入框的 `input.value` 就是字符串，所以 `season: "1"` 会原样传到这里，
+ * 而判季号用的是**严格相等**（`want.season === sig.season`）—— `"1" === 1` 为 false，
+ * 于是所有条目都被判成"季不同"、季集分归 0、总分掉到 0.739 被分数线淘汰
+ * （实测：网页上填了「季」就一条都不命中）。
+ * 归一化放在判据入口一次，网页 / 客户端 / 外部接口都不会再踩；空值与非数字一律当作"没这个信号"，
+ * 与"源里没有季集信息"走同一条路（缺项不进分母）。
+ */
+function normWant(want) {
+  const w = Object.assign({}, want || {});
+  for (const k of ['season', 'episode']) {
+    const v = w[k];
+    if (v === undefined || v === null || v === '') {
+      delete w[k];
+      continue;
+    }
+    const n = Number(v);
+    if (Number.isFinite(n)) w[k] = n;
+    else delete w[k];
+  }
+  return w;
+}
+
+/**
  * 给一个条目打分。`want`：`{ name, year, season, episode }`。
  * 返回 `{ score, rejected, reason, parts, signals }` —— `parts` 里逐项写着"为什么是这个分"，
  * 面板上要显示它（可解释性是这套算法的前提，别把理由丢掉）。
@@ -311,8 +336,10 @@ function scoreItem(want, item) {
 function select(items, want, { minScore = 0, maxItems = 0, unmatchedMax = 20 } = {}) {
   const min = Number(minScore) > 0 ? Number(minScore) : 0;
   const cap = Number(maxItems) > 0 ? Math.floor(Number(maxItems)) : 0;
+  /* 判据入口统一把 want 的数字项转成数字（调用方可能给字符串，见 normWant） */
+  const w = normWant(want);
 
-  const scored = (items || []).map((it) => ({ item: it, m: scoreItem(want, it) }));
+  const scored = (items || []).map((it) => ({ item: it, m: scoreItem(w, it) }));
 
   /* ⚠️ **不做"同站同名只留一条"那种去重**（该做法已否决）：
    * 理由是"去重会把该留的挑掉" —— 同名的几条各有自己的 `vod_id`，谁真能播只有取过 detail 才知道，
@@ -386,4 +413,4 @@ function sameNameSameSiteCount(scored) {
   return extra;
 }
 
-module.exports = { cleanTitle, extractSignals, nameScore, episodeScore, yearScore, scoreItem, select, W, QUALIFIER_RE };
+module.exports = { cleanTitle, extractSignals, nameScore, episodeScore, yearScore, scoreItem, select, normWant, W, QUALIFIER_RE };
