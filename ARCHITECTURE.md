@@ -59,13 +59,15 @@ server/modules/
     store.js              本地源清单
     config-proxy.js       源配置中心的同源代理
     host-boot.js          启动时恢复本地源
-  agg/                    6 文件   /api/agg/*
-    index.js              模块清单
+  agg/                    8 文件   /api/agg/*
+    index.js              模块清单（含测速任务的开机 / 设置变更两个钩子）
     routes.js             路由
-    settings.js           聚合设置（源清单、站点勾选与顺序、超时/并发、打分参数、线路过滤）
+    settings.js           聚合设置（源清单、站点勾选与顺序、超时/并发、测速开关、打分参数、线路过滤）
     service.js            搜索 / 详情 / 播放的编排（站源协议解析都在这一层）
     match.js              片名清洗与打分（挑片判据的唯一实现）
-    api.js                进程内调用面：loadSites / detail / play
+    site-stats.js         站点统计：测速结果（speed）+ 顺手记账（call），**每站每类只留最近一次**
+    site-test.js          站点测速任务：每 6 小时自动一轮 / 手动 / 源起来后测它的站点
+    api.js                进程内调用面：loadSites / detail / play / probeSearch
   emby/                   7 文件   /api/emby/**
     index.js              模块清单
     routes.js             端点注册（已实现端点与面板自用端点必须注册在 501 通配之前）
@@ -116,7 +118,8 @@ data/settings/source.json   { port, host, autostart }            新建托管源
 data/settings/agg.json      { sources: [{ id, url, name, enabled }]   自定义源（外部地址）
                               enabled: [{ source, key }]              站点勾选
                               order:   [{ source, key }]              站点顺序
-                              timeoutMs, concurrency, initFirst
+                              timeoutSec, detailTimeoutSec, concurrency     单站超时 / 取详情超时（秒）
+                              speedTestAuto, speedTestHours          站点测速（默认开 · 6 小时）
                               matchMinScore, matchMaxItems, matchExtraK, matchExtraAll
                               lineFilter }
 data/settings/emby.json     { serverName, imageKey, serverId,

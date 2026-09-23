@@ -13,7 +13,7 @@
  *   ③ **页面不可见时暂停**（`document.hidden`）：切到后台就别再轮询了。
  *   另外 DOM 也设了上限（`DOM_MAX`）：面板内存只留 N 条，页面上再多也只是一屏历史。
  */
-import { el, toast, copy } from '../../core/dom.js';
+import { el, toast } from '../../core/dom.js';
 import { api } from '../../core/api.js';
 
 /** 轮询间隔 —— 2 秒够"即时"，又不会把面板刷爆 */
@@ -53,7 +53,6 @@ export function renderPanelLogs(v) {
   /* ---------------- 工具条 ---------------- */
   const pauseBtn = el('button', { class: 'btn mini', text: '暂停' });
   const clearBtn = el('button', { class: 'btn mini danger', text: '清空' });
-  const copyBtn = el('button', { class: 'btn mini', text: '复制' });
 
   /** 级别过滤：全部（含 info/log）/ 警告以上 / 仅错误 */
   const LEVELS = [
@@ -139,15 +138,6 @@ export function renderPanelLogs(v) {
     }
   });
 
-  copyBtn.addEventListener('click', () => {
-    const text = [...listEl.children]
-      .filter((r) => !r.classList.contains('hidden'))
-      .map((r) => r.textContent)
-      .join('\n');
-    if (!text) return toast('没有可复制的内容', true);
-    copy(text);
-  });
-
   /* ---------------- 组装 ---------------- */
   v.append(
     el(
@@ -158,7 +148,6 @@ export function renderPanelLogs(v) {
         { class: 'toolbar' },
         pauseBtn,
         clearBtn,
-        copyBtn,
         el('span', { class: 'sep' }),
         ...levelBtns,
         el('span', { class: 'spacer' }),

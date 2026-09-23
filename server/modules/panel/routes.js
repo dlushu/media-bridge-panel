@@ -92,9 +92,14 @@ function legacyAggView() {
     agg: {
       enabled: a.enabled,
       order: a.order,
-      timeoutMs: a.timeoutMs,
+      /* 设置里是**秒**（`timeoutSec` / `detailTimeoutSec`），这里换算成毫秒给前端用：
+       * 「站点与参数」页拿 `timeoutMs` 与测速结果比（比它慢的站聚合里必被判超时）。 */
+      timeoutMs: Math.max(1000, Math.round((Number(a.timeoutSec) || 5) * 1000)),
+      detailTimeoutMs: Math.max(1000, Math.round((Number(a.detailTimeoutSec) || 10) * 1000)),
       concurrency: a.concurrency,
-      initFirst: a.initFirst,
+      /* 测速的两个旋钮（`initFirst` 已删：init 恒开，见 agg/service.js 的 ensureInit） */
+      speedTestAuto: a.speedTestAuto,
+      speedTestHours: a.speedTestHours,
       /* ⚠️ **这里必须把 agg 的设置全带上**：前端启动时读的就是这份（`S.settings.agg`），
        * 少一个键，页面刷新后就当它不存在 —— 实测：`lineFilter` 没带 → "保存完刷新编辑框还是空的"，
        * `matchExtraK` 没带 → 打分设置那页刷新后显示默认值，一点保存就把用户设的值覆盖掉（8 → 3）。

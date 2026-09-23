@@ -56,7 +56,11 @@ export const MODULES = [
     pages: () => [['agg-host', '源列表'], ['agg-sites', '站点与参数'], ['agg-params', '聚合参数'], ['agg-search', '聚合搜索']],
   },
   { id: 'emby', label: 'Emby', pages: () => [['emby-setup', '连接设置'], ['emby-home', '首页插件']] },
-  { id: 'panel', label: '面板设置', pages: () => [['panel', '概览'], ['panel-settings', '设置'], ['panel-logs', '日志']] },
+  {
+    id: 'panel',
+    label: '面板设置',
+    pages: () => [['panel', '概览'], ['panel-settings', '设置'], ['panel-about', '关于'], ['panel-logs', '日志']],
+  },
 ];
 
 export function moduleOf(page) {

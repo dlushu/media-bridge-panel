@@ -1,17 +1,23 @@
 'use strict';
 /**
- * 猫爪源模块 · 「配置中心」页：用同源代理把**某个源**自带的 /website 嵌进来（iframe）。
+ * 猫爪源模块 · 「配置中心」页：把**某个源**自带的 `/website` 嵌进来（iframe）。
  *
  * **每个运行中的源各有一页**（页 id = `website-<本地源id>`，见 registry.pages()），
- * 页内还给了个源下拉 —— 免得为了换一个源还要跑回左侧导航点一下。
+ * 页内还有个源下拉 —— 免得为了换一个源还要跑回左侧导航点一下。
  *
- * 走面板的同源代理 `/website`：iframe 里的前端写的是**绝对路径**（`/website/api/…`），
- * 所以"看的是哪个源"由**面板记住**（首帧带 ?source=<源id>，见 source/routes.js），
- * 从 127.0.0.1 还是局域网/Tailscale IP 打开面板都能正常加载。
+ * **iframe 直接指向源自己的地址**：`http://<当前访问面板用的域名>:<源端口>/website` ——
+ * 用哪个域名进的面板（局域网 IP / Tailscale IP / 域名）就用哪个域名，端口是源的端口。
+ * 这样"看的是哪个源"从地址栏就看得见，也不用面板在中间记着（老实现走面板的同源代理
+ * `/website?source=<源id>`，因为源的页面内部写的是绝对路径，只能靠面板记）。
+ *
+ * ⚠️ **两种访问方式会看不到**（如实写在页面上，不静默）：
+ *   · 源端口没发布到宿主（docker-compose 里 9988-9998 那段）→ 浏览器连不上源；
+ *   · 用 **https** 打开面板 → 浏览器会拦 http 的 iframe（混合内容）。
+ * 这两种情况都退回面板的同源代理：`/website?source=<源id>`（服务端那条路由还在）。
  */
-import { el, copy } from '../../core/dom.js';
+import { el } from '../../core/dom.js';
 import { S } from '../../core/state.js';
-import { renderPage, switchPage } from '../../core/shell.js';
+import { switchPage } from '../../core/shell.js';
 import { runningSources, websiteSourceOfPage, WEBSITE_PAGE_PREFIX } from '../../core/registry.js';
 
 export function renderWebsite(v) {
@@ -19,9 +25,12 @@ export function renderWebsite(v) {
   /* 当前页绑着哪个源；没有（老 id / 外部托管源）就退回第一个在跑的 */
   const picked = websiteSourceOfPage(S.page) || (list[0] && list[0].id) || '';
   const cur = list.find((x) => x.id === picked) || null;
-  /* 本地源这里要**自己拼**（`cur.run` 是 runner 的状态：有 port，没有 url）；没本地源才退回托管源地址 */
-  const url = cur ? `http://127.0.0.1:${cur.run.port}` : ((S.run && S.run.url) || '');
-  const src = cur ? `/website?source=${encodeURIComponent(cur.id)}` : '/website';
+  /* 本地源：用**访问面板的这个域名** + 源端口（`cur.run` 是 runner 的状态：有 port，没有 url）。
+   * 没有本地源就退回托管源地址（外部源只能用它给的完整地址）。 */
+  const base = cur ? `http://${location.hostname}:${cur.run.port}` : ((S.run && S.run.url) || '');
+  const src = base ? base + '/website' : '';
+  /* 兜底：面板的同源代理（见文件头那两种"直连看不到"的情况） */
+  const proxied = cur ? `/website?source=${encodeURIComponent(cur.id)}` : '/website';
 
   const sel = el('select');
   if (!list.length) {
@@ -38,20 +47,15 @@ export function renderWebsite(v) {
     { class: 'toolbar pad-x pad-t' },
     el('span', { class: 'muted', text: '源：' }),
     sel,
-    el('button', { class: 'btn', text: '重新加载', onclick: () => renderPage() }),
-    el('a', { class: 'btn', href: src, target: '_blank', rel: 'noreferrer', text: '新窗口打开' }),
-    el('button', { class: 'btn', text: '复制本页地址', onclick: () => copy(location.origin + src) }),
+    el('a', { class: 'btn', href: src || proxied, target: '_blank', rel: 'noreferrer', text: '新窗口打开' }),
     el('span', { class: 'spacer' }),
-    el('span', { class: 'note mono', text: (url || '?') + '/website' })
+    el('span', { class: 'note mono', text: (base || '?') + '/website' })
   );
 
-  if (!url) {
+  if (!base) {
     v.append(toolbar, el('div', { class: 'hint warn mg-x' }, '还没有运行中的源。请到「源托管 · 猫源地址」添加并运行，或在「聚合设置 · 源列表」填一个源地址。'));
     return;
   }
 
-  v.append(
-    toolbar,
-    el('div', { class: 'frame-wrap' }, el('iframe', { class: 'embed', src, referrerpolicy: 'no-referrer' }))
-  );
+  v.append(toolbar, el('div', { class: 'frame-wrap' }, el('iframe', { class: 'embed', src, referrerpolicy: 'no-referrer' })));
 }

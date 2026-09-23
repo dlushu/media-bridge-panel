@@ -40,6 +40,14 @@ module.exports = {
   /** 开机启动自动更新的计时（server.js 在面板起来后调一次；默认关就什么都不做） */
   startAutoUpdate: () => autoUpdate.start(),
 
+  /**
+   * 「某个源真的监听上了」的订阅入口 —— 由 **server.js** 接到聚合层的测速任务
+   * （源起来后立刻测一轮它的站点，见 agg/site-test.js 的 sourceUp）。
+   * 这里只转发 `runner.onReady`，**不 import 聚合层**：source 是最底层，反过来依赖 agg
+   * 会把分层弄反，接线交给 server.js（与 `startAutoUpdate()` 同一套做法）。
+   */
+  onSourceReady: (cb) => runner.onReady(cb),
+
   routes,
 
   /** 启动日志用 */

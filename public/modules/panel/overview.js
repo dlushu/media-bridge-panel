@@ -4,7 +4,7 @@
  *
  * 要动设置去同模块的「设置」页（备份还原 / 面板密码）。
  */
-import { el, copy } from '../../core/dom.js';
+import { el } from '../../core/dom.js';
 import { api } from '../../core/api.js';
 
 export function renderPanelOverview(v) {
@@ -25,17 +25,6 @@ export function renderPanelOverview(v) {
       for (const [k, val] of rows) {
         body.append(el('div', { class: 'kv' }, el('span', { class: 'k', text: k }), el('span', { class: 'v', text: val || '-' })));
       }
-      card.append(
-        el(
-          'div',
-          { class: 'actions' },
-          el('button', {
-            class: 'btn mini',
-            text: '复制这些路径',
-            onclick: () => copy(rows.map(([k, val]) => `${k}: ${val}`).join('\n')),
-          })
-        )
-      );
     })
     .catch((e) => body.append(el('div', { class: 'note err-note', text: '取运行环境失败：' + e.message })));
 }

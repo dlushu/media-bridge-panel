@@ -20,20 +20,39 @@
  * 这里只管 HTTP：解 body → 调 api → 按 `error.status` 决定状态码。
  * emby 层走的是同一个 api（见 api.js 的说明）。
  */
+const fs = require('fs');
 const settings = require('../../core/settings');
 const { sendJson, sendError, readBody } = require('../../core/http');
 const api = require('./api');
-const { aggregateSearch, selectSites } = require('./service');
+const siteTest = require('./site-test');
+const { aggregateSearch, selectSites, searchTimeoutMs, detailTimeoutMs } = require('./service');
 
 /**
  * 一次性搬迁（项目未发布，不做兼容分支）：把多源之前的两样东西搬成新形状。
  *   ① `upstream.source`（**单个**猫源地址）→ `sources[0]`（地址本身有价值，不能丢）
  *   ② `enabled` / `order` 里的**裸站点 key** → 丢弃（"它属于哪个源"无从得知，提示重新勾选）
+ *   ③ `timeoutMs`（毫秒，单项）→ `timeoutSec`（秒，搜索用）：单位统一成秒，旧值四舍五入搬过去；
+ *      详情那一项（`detailTimeoutSec`）是新加的，没有旧值可搬，直接取默认 10 秒
  * 不搬 ② 的话，新的 validate 会一直拒掉后续保存（旧非法项还留在数组里）。
  * 只在启动注册路由时跑一次；干净了就什么也不做。
  */
+/**
+ * 盘上**原样**的那份 agg 设置（不经默认值合并）。
+ * 判断"某个键有没有被写过"只能看它 —— `settings.read()` 会把 defaults 合并进来，
+ * 于是 `timeoutSec` 永远是 5，拿合并后的值判"没写过"必然判错（旧值会静默丢掉）。
+ */
+function readAggFile() {
+  try {
+    const v = JSON.parse(fs.readFileSync(settings.fileOf('agg'), 'utf8'));
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  } catch {
+    return {};
+  }
+}
+
 function migrateLegacy() {
   const cfg = settings.read('agg');
+  const file = readAggFile();
   const isPair = (x) => !!x && typeof x === 'object' && x.source && x.key;
   const next = Object.assign({}, cfg);
   const notes = [];
@@ -50,6 +69,15 @@ function migrateLegacy() {
     next.order = [];
     notes.push('旧的裸站点 key 已丢弃（请重新勾选站点）');
   }
+
+  /* 单站超时：毫秒 → 秒（`timeoutMs` → `timeoutSec`）。**必须搬**：用户调过的 12000 不能
+   * 被静默退回默认 5 秒（那是两倍多的差别）。判据看 `file`（盘上原样那份），见 readAggFile。 */
+  if (file.timeoutMs !== undefined && file.timeoutSec === undefined) {
+    const sec = Math.min(60, Math.max(1, Math.round(Number(file.timeoutMs) / 1000) || 5));
+    next.timeoutSec = sec;
+    notes.push(`单站超时 ${file.timeoutMs}ms → ${sec}s`);
+  }
+  if (next.timeoutMs !== undefined) delete next.timeoutMs;
 
   if (!notes.length) return;
   settings.write('agg', next);
@@ -89,9 +117,11 @@ module.exports = function routes(r) {
       agg: {
         enabled: cfg.enabled || [],
         order: cfg.order || [],
-        timeoutMs: cfg.timeoutMs,
+        /* 设置里是**秒**（`timeoutSec` / `detailTimeoutSec`），这里统一换成毫秒给前端：
+         * 「站点与参数」页拿 `timeoutMs` 与测速结果比（比它慢的站聚合里必被判超时）。 */
+        timeoutMs: searchTimeoutMs(cfg),
+        detailTimeoutMs: detailTimeoutMs(cfg),
         concurrency: cfg.concurrency,
-        initFirst: cfg.initFirst,
         /* 打分默认值一起给：web「聚合搜索」页的"最低分/最多取几条"输入框就是拿它预填的
          * （页面里改只影响这一次请求；要改默认值去「聚合设置」页） */
         matchMinScore: cfg.matchMinScore,
@@ -128,6 +158,43 @@ module.exports = function routes(r) {
     /* `ranked` 是"过关全量的排名"，只给聚合层内部（detail 的接续补打）用；
      * 回给前端等于把同一批条目再序列化一遍（响应大一倍），这里删掉。 */
     delete out.ranked;
+    return sendJson(res, 200, out);
+  });
+
+  /**
+   * 站点测速（**服务端异步任务**，实现见 `./site-test.js`）—— 「站点与参数」页那一列「延迟」的来源。
+   *
+   *   GET  /api/agg/site-test         进度 + 配置 + 上次/下次（前端据此画进度条与"上次测速"）
+   *   POST /api/agg/site-test/start   开一轮；body 可带 `keys`（`{source,key}[]` = 只测这些站，
+   *                                   缺省 = 全部站点）；上一次没跑完 → **409**（与猫源自动更新一致）
+   *   POST /api/agg/site-test/stop    请求停止当前这一轮（已测完的结果照常保留）
+   *
+   * 为什么挪到服务端：一轮要打上百个站、按 3 并发跑几分钟。原先是前端逐站调、
+   * 进度与中止都在浏览器里 —— 一关页面就断，而"每 6 小时自动测一轮""源起来后自动测一轮"
+   * 这两件事本来就不可能是前端干的。
+   */
+  r.add('GET', '/api/agg/site-test', (req, res) => sendJson(res, 200, siteTest.state()));
+
+  r.add('POST', '/api/agg/site-test/start', async (req, res) => {
+    const body = (await readBody(req)) || {};
+    const out = siteTest.start({ reason: 'manual', keys: Array.isArray(body.keys) ? body.keys : undefined });
+    /* 撞上正在跑的一轮 → 409，别让前端以为"点了就跑起来了" */
+    return sendJson(res, out.busy ? 409 : 200, out);
+  });
+
+  r.add('POST', '/api/agg/site-test/stop', (req, res) => sendJson(res, 200, siteTest.stop()));
+
+  /**
+   * POST /api/agg/site-test/one —— **单站测速**（站点表里那一行的小按钮）。
+   *
+   * body：`source` + `key`（+ 可选 `api`，站点清单里就有）。**同步**返回这一发的结果，
+   * 并且**不碰后台任务**（不改它的进度、不重排自动测速）—— 它只把结果写进同一个统计槽，
+   * 所以刷新出来的就是"当前测速结果"（也顺带把"因测速失败被跳过"的状态改掉）。
+   * 会真的打上游（1~2 发 `/search`，单站最多 15 秒），所以按钮点击期间要禁用。
+   */
+  r.add('POST', '/api/agg/site-test/one', async (req, res) => {
+    const out = await api.probeSearch((await readBody(req)) || {});
+    if (!out.ok) return fail(res, out);
     return sendJson(res, 200, out);
   });
 

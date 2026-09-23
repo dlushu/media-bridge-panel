@@ -61,9 +61,13 @@
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/agg/sources` | **源清单（不探测）**：本地部署的源（自动，带 `deployed`/`port`/`running`）+ 自定义源，几毫秒返回。「源列表」页先渲染即依赖它 |
-| GET | `/api/agg/sites` | **源清单 + 站点清单**：并发拉取每个聚合源的 `/config`，摊平成 `sites[]`（每项带 `source`/`sourceName`）；单源失败只回它自己的 `ok`/`error` |
+| GET | `/api/agg/sites` | **源清单 + 站点清单**：并发拉取每个聚合源的 `/config`，摊平成 `sites[]`（每项带 `source`/`sourceName`）；单源失败只回它自己的 `ok`/`error`。每项的 `stat` 是这个站的统计：`{ probe, call:{search,detail} }`（`probe` = 最近一次测速结果，`call.*` = 最近一次真实业务，见「站点测速」一节） |
+| GET | `/api/agg/site-test` | **站点测速状态**（服务端后台任务）：`{enabled, hours, concurrency, timeoutMs, running, done, total, okCount, emptyCount, badCount, stopped, lastRunAt, lastElapsedMs, nextRunAt, pending}` —— 前端据此画"测速中 x/y"与"上次 / 下次"（计数刻意不叫裸名 `ok`/`bad`：响应里那个 `ok` 是"这次调用成功了吗"） |
+| POST | `/api/agg/site-test/start` | **开一轮测速**：body 可带 `keys`（`[{source,key}, …]` = 只测这些站；省略 = **全部站点**）；上一次没跑完 → **409** `{busy:true}` |
+| POST | `/api/agg/site-test/stop` | **停止当前这一轮**（已测完的那些站的结果照常保留） |
+| POST | `/api/agg/site-test/one` | **单站测速**（站点表每行的「测速」按钮）：`{source, key, api?}` → **同步**返回这一发的结果（`search` + `attempts` + `stat`）；不改后台任务的状态、不重排自动测速，只写同一个统计槽 |
 | POST | `/api/agg/search` | **聚合搜索（带打分）**：`{wd, page?, year?, season?, episode?, minScore?, maxItems?, timeoutMs?, concurrency?, keys?}` → `{wd, page, elapsedMs, sites, matched, unmatched, match, stats}`；`keys` 是**站点白名单** `[{source,key}, …]`（省略则用 `agg.enabled`）；每条结果带 `score`/`matched`/`matchReason` |
-| POST | `/api/agg/detail` | 取详情（内部含搜索）：`{name, year?, season?, episode?, minScore?, maxItems?, extraK?, extraAll?, keys?, source?+site?+vodId?}` → `{ok:true, sites, picked, stats, sources, elapsedMs}`（每站一条 `detail`：线路 → 选集）；调用方输入有误（未给 name / 未配源 / 未勾站点）→ 400 `{error}` |
+| POST | `/api/agg/detail` | 取详情（内部含搜索）：`{name, year?, season?, episode?, minScore?, maxItems?, extraK?, extraAll?, timeoutMs?, detailTimeoutMs?, keys?, source?+site?+vodId?}` → `{ok:true, sites, picked, stats, sources, elapsedMs}`（每站一条 `detail`：线路 → 选集）；调用方输入有误（未给 name / 未配源 / 未勾站点）→ 400 `{error}` |
 | POST | `/api/agg/play` | 取播放地址：`{source, site, flag, episodeId}` → 归一化后的 `urls[]` / `header` / `parse` |
 
 `detail` / `play` 的编排位于 **`agg/api.js`**：路由层（上表两条端点）与 **emby 层**共用同一套实现，
@@ -85,6 +89,12 @@ emby 层直接 `require` 该模块而**不经过 HTTP**（原因见 [ARCHITECTUR
   请求里可覆盖（web「聚合搜索」页的那三个输入框即对应它们）。
 - **条数为什么要限制**：每多保留一条命中，后续就要多打一次站源 `/detail` 取链。实测 3 条 ≈ 2s，
   全部保留要到十几秒。
+- **两个超时分开、单位是秒**（见 [ADR-0026](adr/0026-seconds-and-detail-timeout.md)）：
+  「单站超时」`agg.timeoutSec`（秒，默认 5）= 搜索 / 播放 / 首次 `/init`；
+  「取详情超时」`agg.detailTimeoutSec`（秒，默认 10）= 取详情 `POST /detail` 的单站上限。
+  详情独自一档是因为**剧集目录动辄几十上百集**（响应体大、上游拼装慢），与搜索共用一个超时会
+  大量"定位不到"。请求里可分别用 `timeoutMs` / `detailTimeoutMs`（**毫秒**）单次覆盖；
+  详情超时**进详情快照的 key**（改了要重算一次）。
 - **web 上可直接查看版本**：每条搜索结果上的「**这条的版本**」走 `source+site+vodId` 快路径（跳过搜索），
   以**弹窗**列出客户端会看到的内容 —— 每站「定位到这一集 N 条线路」+ 逐条线路的定位情况。
   核对「客户端点开到底会看到什么」看这里（同一套 `agg/api.js`，与 Emby 进程内直调是同一条链）。
@@ -133,8 +143,10 @@ emby 层直接 `require` 该模块而**不经过 HTTP**（原因见 [ARCHITECTUR
 - **只拼接、不去重**：每个站点的条目留在它自己的 `data.list` 里，不复制到顶层、不合并同名。
 - **并发池**：按 `concurrency` 分批并发；单站失败/超时**只影响它自己**（该站 `ok:false` + `error`），
   整体仍返回 **200**。
-- **首次 init**：`initFirst` 打开时，每个站源请求前先 POST 一次 `/init`，按「源地址 + 站点 key」缓存，
-  不是每次请求都打。
+- **首次 init**：每个站源请求前先 POST 一次 `/init`（**恒开** —— 原来那个 `initFirst` 开关已删：
+  有的源不 init 就搜不出来，这是源的性质、不是选项），按「源地址 + 站点 key」缓存，不是每次请求都打。
+  服务端测速任务每轮也走这一处，所以**一轮测速跑完 = 全站都已 init**；源重启换了端口时缓存键跟着变，
+  业务侧会自动重新 init 一次。
 - **同名统计**：`stats.totalItems` / `duplicatedItems` 与界面上的「同名 ×N」都用 `normName()`
   （去除空格与标点引号括号破折号后转小写比较）。
 - **不做「同站同名去重」**（见 [ADR-0004](adr/0004-no-same-site-dedup.md)）：同名的几条各有自己的
@@ -143,8 +155,45 @@ emby 层直接 `require` 该模块而**不经过 HTTP**（原因见 [ARCHITECTUR
 - **错误语义**：`wd` 为空 → 400；未配聚合源 → 400；勾选的站点一个都取不到 → 400
   （并指明是哪个源取不到站点）；单站 HTTP 非 200 → 该站 `ok:false`；详情按「命中才算数」统计
   `stats.detailOk / detailFailed`。
+- **线路过滤参与"这条详情对客户端有没有用"的判据**（[ADR-0025](adr/0025-line-filter-in-usable-judgement.md)）：
+  规则的实现只此一处（`agg/service.js` 的 `lineFilter()`，`agg/api.js` 与 emby 层都转发）。
+  聚合层判断一条条目值不值得留着，用的是**过滤后**的可用条数（`stats.usable`，与客户端真能列出的
+  版本一致；`stats.usableBeforeFilter` 是过滤前的，只作诊断），于是"过滤后一条都列不出来"的条目
+  不算数 —— 接续补打会继续往下找，**详情快照也不存它**。日志里会写
+  `· agg 线路过滤 /…/：过滤前能用 X 条 → 过滤后能用 Y 条`。
 - **手工测某个源的端点**：`ANY /api/base/upstream?p=<路径>&source=<聚合源id>`（不传 `source`
   = 打聚合源列表第一条）。
+
+### 站点测速（agg）
+
+「站点与参数」页那一列「延迟」的来源 —— **服务端后台任务**（`agg/site-test.js`），
+不是前端循环（原先前端逐站调，一关页面就断；而"每 6 小时自动一轮""源起来后自动测一轮"
+这两件事本来就不可能由前端做）。
+
+- **测什么**：每站一发 `POST {api}/search`，**关键词从常见影视名数组里随机取**
+  （`agg/api.js` 的 `PROBE_WORDS`）；**非 200 就换一个词再测一发**，两发都非 200 才算真失败。
+  随机取是为了避开"固定词恰好这站没有"：站里没那个词时会回 404 或空列表（实测 duoduo / huban）。
+- **口径**：`HTTP 200 = 成功`（**列表为空也算** —— 它已经尽了搜索的义务）；非 200 记失败并记下状态码
+  （404 / 500 / 403 …）；超时与网络错记失败。⚠️ 这与业务侧**刻意不同**：`searchSite` 把 404 记成
+  "无结果、不算失败"，所以两笔**分开存**（`speed` 槽 / `call` 槽），别互相覆盖。
+- **"聚合搜索要不要跳过这个站"用的就是 `speed.search`**：失败即跳过、成功即恢复，**没有时间窗口** ——
+  这样"表里标红的站"与"被跳过的站"是同一个集合；恢复时机由测速周期（定时或手动）决定。
+  `call.*` 只用于单元格 `title` 的诊断显示。
+- **单点测速**：`POST /api/agg/site-test/one`（`{source, key, api?}`）只测一个站、**同步**返回，
+  并且**不碰后台任务**（不改进度、不重排自动测速），只写同一个统计槽 ——
+  站点表每行那个「测速」按钮就是它。
+- **固定 15 秒超时**（`SPEED_TEST_TIMEOUT_MS`），**不读 `agg.timeoutSec`** —— 拿 5 秒去测会把慢站
+  一律记成超时，量到的是设置而不是站。
+- **并发 3**、**全部站点**（启用源下的所有站）；**跑完才排下一轮**，不会因为一轮慢而堆起来。
+- **触发**：① 每 `speedTestHours` 小时（默认 6；`speedTestAuto` 默认开）；
+  ② 手动 `POST /api/agg/site-test/start`（可带 `keys` 只测一批站）；
+  ③ **某个源起来/重启后** —— source 层的 `runner.onReady` 只广播 id，`server.js` 接到
+  `agg.siteTestSourceUp`（source 是最底层，不反向依赖 agg），只测那个源的站点；
+  撞上正在跑的一轮就排队，等这轮结束补测。
+- **只留最近一次**：`sitestat.db` 里每站每类一个槽，**直接覆盖**（没有样本数组、没有次数累计），
+  所以那一列只有"最近一次测出来多少"；TTL 30 天。
+- **真实业务那一份不占列**：`searchSite` / `fetchDetail` 的顺手记账（`call.search` / `call.detail`）
+  只出现在单元格的 `title` 里 —— "点开要等多久"只有站点被真的用过才有值，如实留空。
 
 ### 兼容层（临时）
 

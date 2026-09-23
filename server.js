@@ -113,6 +113,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 const sourceModule = registry.get('source');
+const aggModule = registry.get('agg');
 const embyModule = registry.get('emby');
 const panelModule = registry.get('panel');
 
@@ -125,6 +126,14 @@ server.listen(WEB_PORT, WEB_HOST, async () => {
   console.log(`     模块: ${registry.list().map((m) => m.id).join(' · ')}`);
   if (migrated) console.log(`     ↻ 设置已拆分: settings.json → ${migrated.to}（旧文件留档 ${migrated.backup}）`);
   console.log('');
+  /* 站点测速的两处接线（都在这儿做，理由见 agg/index.js 与 source/runner.js 的 onReady）：
+   *   ① 某个源起来/重启后 → 测一轮**它的**站点（source 层只广播 id，不反向依赖聚合层）；
+   *   ② 开机计时：默认每 6 小时自动一轮，2 分钟后先跑一次（见 agg/site-test.js 的 boot）。
+   * ⚠️ ①**必须在 autostartAll 之前接上**，否则开机自启的那些源起来时还没人听。 */
+  if (sourceModule && aggModule && typeof sourceModule.onSourceReady === 'function') {
+    sourceModule.onSourceReady((id) => aggModule.siteTestSourceUp(id));
+  }
+  if (aggModule && typeof aggModule.startSiteTest === 'function') aggModule.startSiteTest();
   if (sourceModule) await sourceModule.autostartAll();
   /* 猫源自动更新（可选，默认关）：勾选与间隔在「源托管 · 猫源地址」页，见 source/auto-update.js。
    * 放这儿 = 面板起来之后才开始计时（不是模块 require 的时候就跑）。 */

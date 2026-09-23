@@ -13,6 +13,7 @@ const settings = require('../../core/settings');
 const { request } = require('../../core/upstream');
 const { normName } = require('../../core/catpaw');
 const match = require('./match'); // 片名清洗 + 打分（"这是不是目标作品"的唯一判据）
+const siteStats = require('./site-stats'); // 顺手记测速统计（见那个文件顶部）
 
 /** 内部复合键：`源 + \\u0001 + 站点key`（用控制字符分隔，配置里不可能出现，零歧义） */
 const sid = (source, key) => String(source || '') + '\u0001' + String(key || '');
@@ -43,13 +44,33 @@ function matchDefaults(opts) {
   };
 }
 
+/**
+ * 单站超时：**设置里是秒、内部一律毫秒**（`request()` 的 `timeout` 就是毫秒）。
+ *
+ * 两个超时**刻意分开**（原来只有一项 `timeoutMs`）：
+ *   · `searchTimeoutMs` —— 搜索 / 播放 / 首次 `/init`：这一发本来就该快，默认 5 秒；
+ *   · `detailTimeoutMs` —— 取详情：**剧集动辄几十上百集**（响应体大、上游拼装慢），
+ *     与搜索共用一个超时会让"目录里内容多的那种"一律记成超时 / 定位不到，默认 10 秒。
+ * 上限与 `settings.validate` 一致（60s / 120s），这里再兜一次 —— 手改配置文件也不至于把请求挂死。
+ */
+const searchTimeoutMs = (cfg) => Math.min(60000, Math.max(1000, Math.round((Number((cfg || {}).timeoutSec) || 5) * 1000)));
+const detailTimeoutMs = (cfg) => Math.min(120000, Math.max(1000, Math.round((Number((cfg || {}).detailTimeoutSec) || 10) * 1000)));
+
 const round3 = (n) => Math.round(Number(n || 0) * 1000) / 1000;
 
-/** 「首次搜索先 POST /init」的缓存：按「源地址 + 站点 key」 */
+/**
+ * 「先 POST /init 再搜」的缓存：按「源地址 + 站点 key」。
+ *
+ * **恒开** —— 原来那个 `agg.initFirst` 开关已删：有的源不 init 就搜不出来，
+ * 而"要不要 init"由源的性质决定、不是可选项（原来默认就是开，删掉开关等于保持现状）。
+ * 测速任务（`agg/site-test.js`）每轮都经过这里，所以**一轮测速跑完 = 全站都 init 过**，
+ * 业务侧首次搜索不必再多打那一次；新加入的站、或源重启换了端口（缓存键跟着源地址变）
+ * 时，业务侧照旧在这里兜底 init 一次。
+ * 返回 true = 这次真打了 `/init`；false = 命中缓存或打失败（失败会删键，下次重试）。
+ */
 const initialized = new Set();
 
 async function ensureInit(source, site, timeoutMs) {
-  if (!settings.read('agg').initFirst) return false;
   const k = source.url + '|' + site.key;
   if (initialized.has(k)) return false;
   initialized.add(k);
@@ -117,6 +138,11 @@ async function searchSite(source, site, wd, page, timeoutMs) {
     r.error = e && e.name === 'AbortError' ? `超时(${timeoutMs}ms)` : String((e && e.message) || e);
   }
   r.ms = Date.now() - t0;
+  /* **顺手记账**（不额外打请求 —— 这个 ms 本来就在结果里；失败也记，超时那下最有用）：
+   * 只用于界面诊断（单元格 title 里那句"最近一次真实搜索"）。
+   * ⚠️ 它写 `call` 槽、口径跟着业务走（404 = 无结果，不算失败）；"要不要跳过这个站"看的是
+   * 测速那一槽（`speed.search`），两者分开存 —— 见 site-stats.js 顶部。 */
+  siteStats.recordCall(r.source, r.key, 'search', r.ms, r.ok, r.error);
   return r;
 }
 
@@ -140,13 +166,14 @@ async function searchSite(source, site, wd, page, timeoutMs) {
 async function aggregateSearch(sources, sites, { wd, page = '1', timeoutMs, concurrency, want, matchOptions } = {}) {
   if (!wd || !String(wd).trim()) throw new Error('请提供搜索关键字 wd');
   const cfg = settings.read('agg');
-  const t = Math.max(1000, Number(timeoutMs) || cfg.timeoutMs || 5000);
+  const t = Math.max(1000, Number(timeoutMs) || searchTimeoutMs(cfg));
   const c = Math.max(1, Math.min(32, Number(concurrency) || cfg.concurrency || 8));
   const byId = sourceMap(sources);
   const queue = (sites || []).slice();
   const results = [];
   const t0 = Date.now();
   let cursor = 0;
+  let skipped = 0;
 
   await Promise.all(
     new Array(Math.min(c, queue.length || 1)).fill(0).map(async () => {
@@ -154,12 +181,39 @@ async function aggregateSearch(sources, sites, { wd, page = '1', timeoutMs, conc
         const i = cursor++;
         if (i >= queue.length) return;
         const site = queue[i];
+        /* **最近一次测速失败**的站：这几轮**跳过**，不打它 —— 不动勾选，站还在清单里；
+         * 下一轮测速（或点该站的「测速」）成功即自动恢复。判据见 site-stats.shouldSkip。 */
+        const skip = siteStats.shouldSkip(site.source, site.key);
+        if (skip) {
+          skipped += 1;
+          results.push({
+            source: site.source,
+            key: site.key,
+            name: site.name,
+            api: site.api,
+            group: site.group,
+            page: null,
+            total: null,
+            ok: false,
+            skipped: true,
+            ms: 0,
+            count: 0,
+            list: [],
+            error: `最近一次测速失败（${skip.error}），先跳过 —— 下一轮测速会自动重试，也可以点该站的「测速」立刻复测`,
+          });
+          continue;
+        }
         // eslint-disable-next-line no-await-in-loop
         const r = await searchSite(needSource(byId, site.source), site, String(wd).trim(), String(page), t);
         results.push(r);
       }
     })
   );
+  if (skipped) {
+    console.log(
+      `  · agg 搜索跳过了 ${skipped} 个"最近一次测速失败"的站点（不打它们，勾选不变；下一轮测速会自动重试）`
+    );
+  }
 
   /* 按 `(源, 站点)` 对齐回 queue 顺序 —— **不能只按 key**（跨源同名会取错） */
   const ordered = queue.map((site) => results.find((r) => r.source === site.source && r.key === site.key)).filter(Boolean);
@@ -190,6 +244,8 @@ async function aggregateSearch(sources, sites, { wd, page = '1', timeoutMs, conc
       }
     } else {
       entry.error = r.error;
+      /* `skipped` = 这次**没打它**（最近一次测速失败，见上面那段）—— 界面靠这个把"跳过"与"这次失败"分开说 */
+      if (r.skipped) entry.skipped = true;
       if (r.responseStatus && r.responseStatus !== 200) entry.http = r.responseStatus;
     }
     outSites.push(entry);
@@ -233,7 +289,9 @@ async function aggregateSearch(sources, sites, { wd, page = '1', timeoutMs, conc
     stats: {
       requested: queue.length,
       ok: ordered.filter((r) => r.ok).length,
-      failed: ordered.filter((r) => !r.ok).length,
+      failed: ordered.filter((r) => !r.ok && !r.skipped).length,
+      /* 这次**没打**的（最近一次测速失败，见 shouldSkip）—— 与"这次失败"分开报，别混成一个数 */
+      skipped: ordered.filter((r) => r.skipped).length,
       empty: ordered.filter((r) => r.ok && r.count === 0).length,
       totalItems,
       duplicatedItems,
@@ -245,6 +303,44 @@ async function aggregateSearch(sources, sites, { wd, page = '1', timeoutMs, conc
 }
 
 /**
+ * Emby **版本列表的线路过滤**（正则，**只匹配线路名** `line.flag`）。
+ *
+ * 实现放在本层（而不是 `api.js`）是因为它**有两处用途，且必须同一套判据**：
+ *   ① emby 层拼版本列表时（经 `api.lineFilter()` 转发，`emby/service.js` 一行转发）；
+ *   ② 本层判断"这条详情对客户端有没有用"时（`detailUsable` 的 `re` 参数，见 ADR-0025）——
+ *      不然就会出现"聚合以为这条有用、客户端却列出 0 条"（实测踩过：4 条线路全被规则滤掉，
+ *      客户端 0 个版本，而快照照样存了下来）。
+ *
+ * ⚠️ 语义不变：**只影响"列出来的版本"，不影响播放**（`resolveStream` 按版本 Id 回查，不查这个列表）。
+ * 规则写错时**不抛**（保存时已校验；这里是运行时兜底）：`re:null + invalid:true`，调用方按"不过滤"走。
+ */
+function lineFilter() {
+  const raw = String((settings.read('agg') || {}).lineFilter || '').trim();
+  if (!raw) return { raw: '', re: null, invalid: false };
+  try {
+    return { raw, re: new RegExp(raw, 'i'), invalid: false };
+  } catch {
+    return { raw, re: null, invalid: true };
+  }
+}
+
+/**
+ * 「这条线路能不能被客户端列出来」—— 与 emby 层 `getItem` 里那两处 `continue` **是同一个判据**
+ *（只在这里实现一次，改一处就得改另一处）：
+ *
+ *   `if (filter.re && !filter.re.test(line.flag)) continue;`     规则不匹配 → 不进版本列表
+ *   `const targets = movie ? line.items || [] : line.target ? [line.target] : [];`
+ *   `if (!targets.length) continue;`                             没有可播目标 → 不进版本列表
+ *
+ * `re` = 编译好的线路过滤正则（`null` = 不过滤）。
+ */
+function lineVisible(line, need, re) {
+  if (re && !re.test(String((line && line.flag) || ''))) return false;
+  if (need === 'item') return ((line && line.items) || []).length > 0;
+  return !need || !!(line && line.target);
+}
+
+/**
  * **一条条目（一个 `vod_id`）取回来的详情能不能用** —— 这是"凑够 N 条"里那"一条"的判据：
  *   · 必须有线路；
  *   · 剧集（`need === true`，即请求带了集号）：**至少要有一条线路定位到了这一集** ——
@@ -253,14 +349,17 @@ async function aggregateSearch(sources, sites, { wd, page = '1', timeoutMs, conc
  *     （实测：`斗破苍穹年番` 那条 10 条线路里有 6 条能定位、虎斑那条 0 条）；
  *   · 电影（`need === 'item'`）：**至少要有一条线路带播放项**（同一条理由）。
  *
+ * `re` = 线路过滤正则（`lineFilter().re`）。**带上它，"能用"就等于"客户端真能列出至少一条版本"**
+ * —— 这正是"接续补打还要不要继续"与"这份快照值不值得存"的判据（ADR-0025）：
+ * 规则把那几条线路全滤掉的条目，对客户端是 0 个版本，不该占着名额、也不该被存成快照。
+ *
  * ⚠️ 计数单位是**条目**，不是站点、也不是线路：一个站可以有多条条目（代表 + 变体），
  * 每一条都可能是"能用"的那一条（实测就是靠变体才拿到 E211 的）。
  */
-function detailUsable(d, need) {
+function detailUsable(d, need, re) {
   const lines = (d && d.lines) || [];
   if (!lines.length) return false;
-  if (need === 'item') return lines.some((l) => (l.items || []).length > 0);
-  return !need || lines.some((l) => l.target);
+  return lines.some((l) => lineVisible(l, need, re));
 }
 
 /* ============================================================
@@ -552,7 +651,7 @@ function variantLabel(fullName) {
  *   · 缺省 `''`  —— **剧集**取法：按传进来的季集号定位，每条线路的 `line.target` 是**这一集**；
  *   · `'items'` —— **电影**取法：**每条线路的每个播放项**各成一个目标（`line.items[]`），不按集号匹配。
  */
-async function fetchDetail(source, site, vodId, timeoutMs, season, episode, pick) {
+async function fetchDetailOnce(source, site, vodId, timeoutMs, season, episode, pick) {
   /* 站点字段统一叫 `key`（与 searchSite / 对外形状一致）—— 曾用名 `site`，与 search 混用会使消费方读不到 key */
   const r0 = { source: source.id, key: site.key, name: site.name, api: site.api, ok: false, ms: 0, data: null, detail: null, error: null };
   const t0 = Date.now();
@@ -648,6 +747,24 @@ async function fetchDetail(source, site, vodId, timeoutMs, season, episode, pick
 }
 
 /**
+ * 取详情 + **顺手记账**（写 `call.detail`）。
+ *
+ * 记账放在这层薄壳里而不是塞进 `fetchDetailOnce`：那个函数有**好几处提前 return**
+ * （`msearch:` 这类 id 的详情是空、解析不出线路等），塞在里面就得每处都记一次、迟早漏一处。
+ * 壳子只做一件事，所有路径都经过它。
+ *
+ * ⚠️ 现在**只有这一处**会写"详情耗时"（测速那一轮不再测详情，理由见 site-stats.js 顶部）：
+ * 所以界面那一列的含义是"这站最近一次被**真的点开**取详情时花了多久" ——
+ * 没人点过它就是空的（如实留空，不编）。
+ */
+async function fetchDetail(source, site, vodId, timeoutMs, season, episode, pick) {
+  const r0 = await fetchDetailOnce(source, site, vodId, timeoutMs, season, episode, pick);
+  /* **失败也记**（超时那一下是最有用的数据）；"无结果"不算失败，`ok` 的定义见 fetchDetailOnce */
+  siteStats.recordCall(r0.source, r0.key, 'detail', r0.ms, r0.ok, r0.error);
+  return r0;
+}
+
+/**
  * 详情主流程：**内部含搜索**（调用方只给影视名）。
  *
  *   name + year + 季集        → 并发搜各站 → **打分挑片**（`match.js`）→ 命中项取 detail
@@ -666,7 +783,9 @@ async function fetchDetail(source, site, vodId, timeoutMs, season, episode, pick
 async function aggregateDetail(sources, sites, opts = {}) {
   const cfg = settings.read('agg');
   const byId = sourceMap(sources);
-  const timeoutMs = Math.max(1000, Number(opts.timeoutMs) || cfg.timeoutMs || 5000);
+  const timeoutMs = Math.max(1000, Number(opts.timeoutMs) || searchTimeoutMs(cfg));
+  /* 取详情**单独一项超时**（默认 10 秒，比搜索宽）—— 下面每一次 `fetchDetail` 都用它。 */
+  const detailMs = Math.max(1000, Number(opts.detailTimeoutMs) || detailTimeoutMs(cfg));
   const t0 = Date.now();
   const out = {
     name: String(opts.name || ''),
@@ -674,7 +793,7 @@ async function aggregateDetail(sources, sites, opts = {}) {
     searched: false,
     picked: null,
     sites: [],
-    stats: { searched: 0, sameName: 0, variants: 0, detailOk: 0, detailFailed: 0, timeoutMs, sources: 0 },
+    stats: { searched: 0, sameName: 0, variants: 0, detailOk: 0, detailFailed: 0, timeoutMs, detailTimeoutMs: detailMs, sources: 0 },
   };
 
   const season = opts.season === undefined || opts.season === null || opts.season === '' ? null : Number(opts.season);
@@ -682,6 +801,9 @@ async function aggregateDetail(sources, sites, opts = {}) {
   /* 取法：`items` = 电影（每条线路列出**全部播放项**），缺省 = 剧集（按季集号定位一条）。
    * 两者互斥地决定"什么算可播目标"，判据与理由见 `fetchDetail` 顶部。 */
   const pick = opts.pick === 'items' ? 'items' : '';
+  /* 线路过滤规则：**参与"能用"的判据**（见 `detailUsable` 与 ADR-0025）——
+   * 否则会出现"命中 3 条、客户端 0 个版本"，而接续补打还以为已经凑够了。 */
+  const lf = lineFilter();
 
   /* ---- 快路径：已知绑定（source + site + vodId），跳过搜索 ---- */
   if (opts.site && opts.vodId) {
@@ -691,7 +813,7 @@ async function aggregateDetail(sources, sites, opts = {}) {
       out.elapsedMs = Date.now() - t0;
       return out;
     }
-    const r = await fetchDetail(needSource(byId, s.source), s, opts.vodId, timeoutMs, season, episode, pick);
+    const r = await fetchDetail(needSource(byId, s.source), s, opts.vodId, detailMs, season, episode, pick);
     out.sites = [r];
     out.picked = { source: s.source, key: s.key, vodId: opts.vodId, matchedBy: 'given', sameNameCount: 1 };
     if (r.ok) out.stats.detailOk += 1; else out.stats.detailFailed += 1;
@@ -764,13 +886,17 @@ async function aggregateDetail(sources, sites, opts = {}) {
   });
   /* 接续补打要用的两本账（判据见下面那段说明）：
    *   `attempted`  = 已经打过 `/detail` 的条目（`vod_id`）—— 补打时别再打一遍；
-   *   `usableItems`= 其中**能用**的条数（`detailUsable`）—— 目标是凑够 `maxItems` 条。 */
+   *   `usableItems`= 其中**能用**的条数（`detailUsable`）—— 目标是凑够 `maxItems` 条。
+   * `usableBefore` 是同一批条目**不看线路过滤**时的可用条数：只用于日志诊断
+   *（"规则挡掉了几条"一眼可见）；补打与判据一律用 `usableItems`（过滤后）。 */
   const needTarget = episode !== null && episode !== undefined;
   out.stats.needTarget = needTarget;
-  /* "这条详情能不能用"的判据跟着取法走：电影看**有没有播放项**，剧集看**有没有定位到这一集** */
+  /* "这条详情能不能用"的判据跟着取法走：电影看**有没有播放项**，剧集看**有没有定位到这一集**；
+   * 再加上线路过滤（`lf.re`）—— 过滤后一条都列不出来的，对客户端就是 0 个版本。 */
   const usableNeed = pick === 'items' ? 'item' : needTarget;
   const attempted = new Set();
   let usableItems = 0;
+  let usableBefore = 0;
 
   const done = new Map();
   await Promise.all(
@@ -784,12 +910,13 @@ async function aggregateDetail(sources, sites, opts = {}) {
       const rep = (picked && sid(picked.source, picked.siteKey) === composite ? picked : null) || sameList[0] || (list[0] && list[0].item);
       if (!rep) return;
       // eslint-disable-next-line no-await-in-loop
-      const repR = await fetchDetail(src, s, rep.vod_id, timeoutMs, season, episode, pick);
+      const repR = await fetchDetail(src, s, rep.vod_id, detailMs, season, episode, pick);
       repR.sameNameCount = sameList.length;
       repR.variantCount = list.length - sameList.length;
       if (repR.ok) out.stats.detailOk += 1; else out.stats.detailFailed += 1;
       attempted.add(String(rep.vod_id || ''));
-      if (detailUsable(repR.detail, usableNeed)) usableItems += 1;
+      if (detailUsable(repR.detail, usableNeed)) usableBefore += 1;
+      if (detailUsable(repR.detail, usableNeed, lf.re)) usableItems += 1;
 
       /* 变体**各自**取详情，挂在该站的 `variants[]`（代表仍占 `detail`，不重复塞一遍 ——
        * 免得多变体时把最大的那块 `lines` 在响应里序列化两遍）。取不到的**如实不带**，不猜。 */
@@ -798,10 +925,11 @@ async function aggregateDetail(sources, sites, opts = {}) {
         const vs = await Promise.all(
           rest.map(async (x) => {
             // eslint-disable-next-line no-await-in-loop
-            const r = await fetchDetail(src, s, x.item.vod_id, timeoutMs, season, episode, pick);
+            const r = await fetchDetail(src, s, x.item.vod_id, detailMs, season, episode, pick);
             if (r.ok) out.stats.detailOk += 1; else out.stats.detailFailed += 1;
             attempted.add(String(x.item.vod_id || ''));
-            if (detailUsable(r.detail, usableNeed)) usableItems += 1;
+            if (detailUsable(r.detail, usableNeed)) usableBefore += 1;
+            if (detailUsable(r.detail, usableNeed, lf.re)) usableItems += 1;
             if (!r.detail) return null;
             return {
               variant: true,
@@ -839,23 +967,29 @@ async function aggregateDetail(sources, sites, opts = {}) {
   const attemptCap = extraAll ? Infinity : targetN + extraK;
   out.stats.targetN = targetN;
   out.stats.matchUsable = usableItems;
+  out.stats.usableBeforeFilter = usableBefore;
+  /* 规则生效时**必须说出来**：不然"为什么还在往下补打""为什么一条都不列"都看不出原因 */
+  if (lf.raw) {
+    console.log(
+      `  · agg 线路过滤 /${lf.raw}/${lf.invalid ? '（规则非法，已忽略）' : ''}：` +
+        `过滤前能用 ${usableBefore} 条 → 过滤后能用 ${usableItems} 条`
+    );
+  }
   if (usableItems < targetN && (extraAll || extraK > 0)) {
     const rest = (search.ranked || []).filter((x) => !attempted.has(String(x.vod_id || '')));
     let extraN = 0;
     let extraUsable = 0;
-    for (const cand of rest) {
-      /* 试过的条数封顶：`attempted` 里既有阶段一打过的、也有本阶段打过的 */
-      if (attempted.size >= attemptCap) break;
-      const site0 = siteByKey(sites, cand.source, cand.siteKey);
-      if (!site0) continue;
-      extraN += 1;
-      attempted.add(String(cand.vod_id || ''));
-      out.stats.extraTried = extraN;
-      // eslint-disable-next-line no-await-in-loop
-      const r2 = await fetchDetail(needSource(byId, site0.source), site0, cand.vod_id, timeoutMs, season, episode, pick);
+    /* **并发度 = 「最多留几条命中」（`targetN`）** —— 一批打这么多，正好是目标条数。
+     * 取舍：并发打就叫不出"凑够就立刻停"那种极限（串行时第 3 条一到就收手），这一批里多打的
+     * 那几条是白打的（多烧上游）；换来的是耗时从"逐条相加"变成"每批取最慢的那条"——
+     * 补打原本最坏是 (maxItems + extraK) 条串行 × 超时，那是最贵的一段。 */
+    const width = Math.max(1, targetN);
+
+    /** 一条候选的结果落账（与串行版逐条做的事完全一样，只是挪到批量之后按名次顺序跑） */
+    const settle = (cand, r2) => {
       if (r2.ok) out.stats.detailOk += 1;
       else out.stats.detailFailed += 1;
-      if (!r2.detail) continue;
+      if (!r2.detail) return;
       const composite2 = sid(cand.source, cand.siteKey);
       if (done.has(composite2)) {
         const base = done.get(composite2);
@@ -875,14 +1009,45 @@ async function aggregateDetail(sources, sites, opts = {}) {
         done.set(composite2, r2);
         if (!wanted.includes(composite2)) wanted.push(composite2);
       }
-      if (detailUsable(r2.detail, usableNeed)) {
+      if (detailUsable(r2.detail, usableNeed)) usableBefore += 1;
+      if (detailUsable(r2.detail, usableNeed, lf.re)) {
         usableItems += 1;
         extraUsable += 1;
         out.stats.usableExtra = extraUsable;
         /* 补打命中的那条当"代表"（emby 层拿它填 ProviderIds —— 那是"真正能播的那个绑定"）。
-         * 只取**第一条**能用的（它分最高），再往下的即使能用也只进版本列表。 */
+         * 只取**第一条**能用的（它分最高），再往下即使能用也只进版本列表。 */
         if (!out.pickedFromExtra) out.pickedFromExtra = cand;
-        if (usableItems >= targetN) break; // 凑够 N 条就算完
+      }
+    };
+
+    let from = 0;
+    for (;;) {
+      /* 试过的条数封顶：`attempted` 里既有阶段一打过的、也有本阶段打过的 */
+      if (attempted.size >= attemptCap || usableItems >= targetN) break;
+      const room = Math.max(1, Math.min(width, attemptCap - attempted.size));
+      const batch = [];
+      while (from < rest.length && batch.length < room) {
+        const cand = rest[from++];
+        if (attempted.has(String(cand.vod_id || ''))) continue; // 阶段一已经打过这条
+        if (!siteByKey(sites, cand.source, cand.siteKey)) continue; // 那个站这次没进清单
+        batch.push(cand);
+      }
+      if (!batch.length) break;
+      for (const cand of batch) attempted.add(String(cand.vod_id || ''));
+      extraN += batch.length;
+      out.stats.extraTried = extraN;
+      // eslint-disable-next-line no-await-in-loop
+      const got = await Promise.all(
+        batch.map(async (cand) => {
+          const site0 = siteByKey(sites, cand.source, cand.siteKey);
+          const r2 = await fetchDetail(needSource(byId, site0.source), site0, cand.vod_id, detailMs, season, episode, pick);
+          return { cand, r2 };
+        })
+      );
+      /* 按**名次**顺序落账（`Promise.all` 保序）：谁先回来不影响"代表取分最高那条" */
+      for (const { cand, r2 } of got) {
+        settle(cand, r2);
+        if (usableItems >= targetN) break; // 这一批里凑够了，剩下的（同批已打完的）就算了
       }
     }
     out.stats.extraHit = extraUsable;
@@ -918,6 +1083,9 @@ async function aggregateDetail(sources, sites, opts = {}) {
      * 在 `bySite`（代表+变体混装）上直接 `.length` 会把变体也算进去（已知的错误来源）。 */
     sameNameCount: (bySite.get(sid(pickedFinal.source, pickedFinal.siteKey)) || []).length || (out.stats.extraHit ? 1 : 0),
   };
+  /* 「这份详情对客户端有没有用」= **过滤后**至少有一条能列出来 ——
+   * `api.js` 的 `cacheableDetail` 读它决定存不存快照（见 ADR-0025）。 */
+  out.stats.usable = usableItems;
   out.elapsedMs = Date.now() - t0;
   return out;
 }
@@ -943,7 +1111,8 @@ const NON_HTTP_URL = /^(push|magnet|ed2k|thunder|ftp|rtmp):/i;
 async function playEpisode(sources, sites, opts = {}) {
   const cfg = settings.read('agg');
   const byId = sourceMap(sources);
-  const timeoutMs = Math.max(1000, Number(opts.timeoutMs) || cfg.timeoutMs || 5000);
+  /* 播放走**搜索那一档**超时（取一个播放地址本来就该快）；要更宽的是详情，不是它。 */
+  const timeoutMs = Math.max(1000, Number(opts.timeoutMs) || searchTimeoutMs(cfg));
   const t0 = Date.now();
   const site = siteByKey(sites, opts.source, opts.site);
   const done = (payload) => Object.assign({ source: opts.source, site: opts.site, flag: opts.flag, elapsedMs: Date.now() - t0 }, payload);
@@ -986,6 +1155,7 @@ async function playEpisode(sources, sites, opts = {}) {
 module.exports = {
   aggregateSearch,
   searchSite,
+  ensureInit,
   normName,
   sid,
   sourceMap,
@@ -996,6 +1166,9 @@ module.exports = {
   parseEpisodeMeta,
   locateEpisode,
   matchDefaults,
+  searchTimeoutMs,
+  detailTimeoutMs,
+  lineFilter,
   normalizeUrls,
   fetchDetail,
   aggregateDetail,

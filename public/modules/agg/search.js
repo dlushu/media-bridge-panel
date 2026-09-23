@@ -20,13 +20,13 @@ import { el, toast, modal, codeBlock } from '../../core/dom.js';
 import { api } from '../../core/api.js';
 import { S } from '../../core/state.js';
 import { ensureAggSites, ensureAggSources } from '../../core/store.js';
-import { switchPage, renderPage } from '../../core/shell.js';
+import { renderPage } from '../../core/shell.js';
 
 /** 一个站超过这么多条就先折叠，点「展开」再看（一个站挂上百条同名很常见） */
 const FOLD_AT = 12;
 
 export function renderAgg(v) {
-  const agg = (S.settings && S.settings.agg) || { enabled: [], timeoutMs: 5000, concurrency: 8 };
+  const agg = (S.settings && S.settings.agg) || { enabled: [], timeoutSec: 5, concurrency: 8 };
 
   const wdInput = el('input', { type: 'text', placeholder: '搜索关键字，例如：斗破苍穹', value: S.aggKeyword, spellcheck: 'false' });
   wdInput.addEventListener('input', () => (S.aggKeyword = wdInput.value));
@@ -190,8 +190,7 @@ export function renderAgg(v) {
     el('label', { class: 'chk', title: maxItemsInput.getAttribute('title') }, maxItemsInput, '最多几条'),
     el('label', { class: 'chk' }, pageInput, '页'),
     el('label', { class: 'chk', title: '忽略勾选，改用「站点与参数」里标了"可搜索"的全部站点' }, useAllCb, '全量站点'),
-    el('span', { class: 'spacer' }),
-    el('button', { class: 'btn mini', text: '站点与参数', onclick: () => switchPage('agg-sites') })
+    el('span', { class: 'spacer' })
   );
 
   if (!S.aggResult) {
@@ -228,6 +227,20 @@ export function renderAgg(v) {
   );
 
   v.append(searchRow, optRow, bar);
+  /* 上次**请求失败**的站这次被**跳过**了（勾选没变、只跳过，见 agg/site-stats.js 的 shouldSkip）——
+   * 明说一句：不然"某站没进结果"看着像它坏了或没勾选。 */
+  const skipped = (r.sites || []).filter((x) => x && x.skipped);
+  if (skipped.length) {
+    v.append(
+      el('div', {
+        class: 'hint warn',
+        text:
+          `这次跳过了 ${skipped.length} 个「最近一次测速失败」的站点（勾选没动，只跳过这几个）：` +
+          skipped.map((x) => `${x.name || x.key}（${x.error}）`).join(' / ') +
+          ' —— 想立刻再试就在「站点与参数」点该站的「测速」，下一轮自动测速也会重试。',
+      })
+    );
+  }
   if (S.aggView === 'merged') renderMerged(v, r, showItemVersions);
   else renderBySite(v, r);
 }

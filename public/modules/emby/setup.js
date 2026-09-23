@@ -15,7 +15,7 @@
  *     （core 的 `data/cache/tmdb.db` + 这里的 `data/emby/cache.db`），用量/清空/淘汰
  *     得一把抓两个，放在面板层才不会"面板管一半、模块管一半"。
  */
-import { el, toast, modal, fmtTime, copy } from '../../core/dom.js';
+import { el, toast, modal, fmtTime } from '../../core/dom.js';
 import { api } from '../../core/api.js';
 import { S } from '../../core/state.js';
 import { renderPage } from '../../core/shell.js';
@@ -229,12 +229,7 @@ export async function renderEmbySetup(v) {
       class: 'note',
       text: 'Emby 客户端「添加服务器 / 添加媒体服务器」时，地址填这个；账号密码用下面「账号管理」里建的那个，服务器名见再下面那张卡。',
     }),
-    el(
-      'div',
-      { class: 'row' },
-      el('code', { text: connectUrl }),
-      el('button', { class: 'btn mini', text: '复制', onclick: () => copy(connectUrl) })
-    ),
+    el('div', { class: 'row' }, el('code', { text: connectUrl })),
     el('p', {
       class: 'note',
       text: '就填主机（客户端自己会补 `/emby`，面板两种都收）。如果哪个客户端死活连不上，把地址换成它后面加 `/api/emby` 再试。另外 9988-9998 是「源托管」里那些源实例用的，客户端不用管。',

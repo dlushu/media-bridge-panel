@@ -9,7 +9,7 @@
  *
  * 结构（详细见 README「目录」）：
  *   core/      通用件与外壳
- *     dom       选择器 · 建节点 · 提示 · 复制 · 代码块
+ *     dom       选择器 · 建节点 · 提示 · 代码块
  *     api       请求封装（非 2xx 抛错）
  *     state     全局状态 S（页面间唯一共享出口）
  *     store     面板级共享数据：站点 / 聚合源 / 聚合设置
@@ -37,7 +37,7 @@ import { renderAgg } from './modules/agg/search.js';
 import { renderEmbySetup } from './modules/emby/setup.js';
 import { renderEmbyHome } from './modules/emby/home.js';
 import { renderPanelOverview } from './modules/panel/overview.js';
-import { renderPanelSettings } from './modules/panel/settings.js';
+import { renderPanelSettings, renderPanelAbout } from './modules/panel/settings.js';
 import { renderPanelLogs } from './modules/panel/logs.js';
 
 /* 页渲染函数登记（必须在 init() 之前跑完） */
@@ -52,6 +52,7 @@ registerPages({
   'emby-home': renderEmbyHome,
   panel: renderPanelOverview,
   'panel-settings': renderPanelSettings,
+  'panel-about': renderPanelAbout,
   'panel-logs': renderPanelLogs,
 });
 

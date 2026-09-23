@@ -575,9 +575,12 @@ docker logs -t media-bridge-panel              # 带时间戳
   - 老配置里残留的 `play.mode` **不再读、也不再校验**（`PLAY_MODE_VALUES` 已删）：盘上留着那个键不影响任何一张卡片保存。
   - **线路过滤（可在面板配：「聚合设置 → 聚合参数 → 线路过滤」）**：一个正则，**只匹配线路名**（`line.flag`）—— 写 `夸克` 只留夸克类线路，写 `百度|UC` 留这两类；留空 = 不过滤。
     **已从 emby 层搬到聚合层**（`agg.json` 的 `lineFilter`，理由是「放聚合设置里面更稳」）：
-    线路本来就是聚合层产出的东西，规则跟它放一起才不「配置在 A、生效在 B」。读数只此一处（`agg/api.js` 的 `lineFilter()`），
+    线路本来就是聚合层产出的东西，规则跟它放一起才不「配置在 A、生效在 B」。读数只此一处（现在在 `agg/service.js` 的 `lineFilter()`，`agg/api.js` 与 emby 层都转发），
     emby 层只转发（`emby/service.js` 的 `lineFilter()` = 一行 `return agg.lineFilter()`）；盘上老的 `emby.json` 的 `play.filter`
     由 `server.js` 启动时搬一次（agg 侧为空、emby 侧有值才搬）。语义没变：**只影响列出的版本，不影响播放**。
+    ⚠️ 但它现在**还参与聚合层"这条详情对客户端有没有用"的判据**（[ADR-0025](adr/0025-line-filter-in-usable-judgement.md)）：
+    过滤后一条都列不出来的条目不算"能用"（补打继续找、快照也不存），并且规则进了快照 key
+    （改规则后第一次请求要重算）。客户端看到的版本列表行为不变。
     - **只影响客户端「列出来的版本」，不影响播放**：`resolveStream` 是按版本 Id（`site + flag + vod`）回查的，**不查这个列表** —— 否则改一次规则，客户端缓存里的旧版本 Id 再来拉流就 404 了。
     - **站点维度的取舍不在这里**（那是聚合层的 `agg.enabled` / `agg.order`）—— 一条正则只管线路名，两个维度各管各的。
     - **过滤后为空就是空的**（既定口径）：**不回退成全部**。日志写清 `线路过滤(/<规则>/)：源里 N 条 → 过滤后 M 条`，M=0 时再加「（版本列表为空）」—— 免得规则写错还误以为生效了。诊断字段 `CatpawSource.LineFilter = { Pattern, Total, Kept, Invalid }`（客户端会忽略）便于面板核对。

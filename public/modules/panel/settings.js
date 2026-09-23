@@ -2,16 +2,15 @@
 /**
  * 面板模块 · 「设置」页：面板自己的设置（跟「概览」分开 —— 概览只看环境，这里动设置）。
  *
- *   · 版本与更新     面板自身按 Release 更新，安装后重启应用进程生效（GET|POST /api/panel/update，
- *                    恢复判据是 /api/meta 的 version 变化；见 docs/adr/0019）
  *   · 配置备份与还原 导出直接下载 .json；还原选一个 .json 文件（GET /api/panel/backup · POST /api/panel/restore）
  *   · TMDB 设置      **共享配置**：emby 层（元数据反查）与聚合层（同名失败时按名字反查）都用它
  *                    存 `panel.json` 的 `tmdb.*`，自检端点 `/api/panel/tmdb/test`（见 core/tmdb.js）
- *   · 缓存设置       **跨两个库**的用量与清空（`data/cache/tmdb.db` + `data/emby/cache.db`），
+ *   · 缓存设置       **跨库**的用量与清空（`data/cache/*.db` + `data/emby/cache.db`），
  *                    端点 `GET|DELETE /api/panel/cache`，策略存 `panel.json` 的 `cache.*`（见 core/cachedb.js）
  *   · 面板密码        改密码（见 core/auth.js）+ 退出登录
- *   · 关于            名称 / 版本 / 代码仓库地址（GET /api/panel/info；仓库地址的唯一来源是
- *                    update.js 的 REPO，可用 APP_REPO 覆盖）
+ *
+ * **版本与更新 / 关于 两张卡在「关于」页**（`renderPanelAbout`）—— 它们是"看看而已"，
+ * 跟这一页"要动手改"的东西分开放（见 registry 里的页面声明）。
  */
 import { el, toast, fmtTime, codeBlock, modal } from '../../core/dom.js';
 import { api } from '../../core/api.js';
@@ -650,7 +649,7 @@ function cacheCard() {
       text:
         '缓存 TMDB 元数据、名字索引（聚合层按名字反查 tmdb id 用）与图片索引，用来少打上游、也让客户端出得了封面；' +
         '另有一层「聚合详情」快照：把「这部片在源里有哪些线路、这一集定位到哪一条」存起来（客户端点一次播放会连问三遍同一件事，' +
-        '靠它省掉后两遍）。清空不影响账号，也不用重新登录。',
+        '靠它省掉后两遍）；还有「站点测速」那份统计（站点表里那两列速度就是它）。清空不影响账号，也不用重新登录。',
     }),
     el('p', {
       class: 'note',
@@ -745,8 +744,8 @@ function passwordCard() {
 }
 
 export function renderPanelSettings(v) {
-  const first = updateCard();
-  v.append(first, backupCard(), passwordCard(), aboutCard());
+  const first = backupCard();
+  v.append(first, passwordCard());
   /* TMDB 卡与缓存卡都要异步读一次设置，各自往 v 末尾插，不挡上面的卡。
    * ⚠️ 两张卡共用一个 `S.panel.settings`：`cacheSection` 在 `tmdbSection` 之后跑，
    * 那时设置已经读回来了（若没读到它会自己再读一次），不会出现"缓存卡拿着空设置"的情况。 */
@@ -769,4 +768,14 @@ export function renderPanelSettings(v) {
       first
     );
   });
+}
+
+/**
+ * 「关于」页：**版本与更新** + **关于**两张卡。
+ *
+ * 从「设置」页挪过来的：「设置」页是"要动手改的东西"（备份/密码/TMDB/缓存），
+ * 而这两张是"看看而已" —— 更新卡里那段说明还动辄几十行，摆在设置页会把要改的卡挤到很下面。
+ */
+export function renderPanelAbout(v) {
+  v.append(updateCard(), aboutCard());
 }

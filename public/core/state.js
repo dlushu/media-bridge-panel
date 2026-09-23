@@ -14,6 +14,7 @@ export const S = {
   aggSites: [],         // 聚合源们的站点（每项带 source/sourceName）
   aggLoadedFor: null,   // 上面两个的缓存指纹（源集合变了才重拉）
   siteFilter: '',
+  siteSort: '',         // 「站点与参数」表的显示顺序：'' = 原顺序 / 'fast' = 延迟快→慢 / 'slow' = 慢→快
   sources: [],          // 本地托管的源（可选便利项）
   page: 'source-bundle', // 当前页；启动时若地址栏有 #/模块/页 会被它覆盖（见 shell.applyHash）
 

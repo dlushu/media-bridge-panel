@@ -101,25 +101,12 @@ export function modal({ title, body = [], actions = [] } = {}) {
   return currentModal;
 }
 
-/** 复制到剪贴板并提示（成功失败都提示） */
-export function copy(text) {
-  navigator.clipboard.writeText(text).then(
-    () => toast('已复制：' + text),
-    () => toast('复制失败', true)
-  );
-}
-
-/** 带标题和「复制」按钮的代码块（接口文档、原始响应体都用它） */
+/** 带标题的代码块（接口文档、原始响应体都用它） */
 export function codeBlock({ label, code }) {
   return el(
     'div',
     { class: 'code-block' },
-    el(
-      'div',
-      { class: 'code-head' },
-      el('span', { class: 'muted', text: label || '示例' }),
-      el('button', { class: 'btn mini', text: '复制', onclick: () => copy(code) })
-    ),
+    el('div', { class: 'code-head' }, el('span', { class: 'muted', text: label || '示例' })),
     el('pre', { class: 'json', text: code })
   );
 }

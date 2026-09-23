@@ -34,6 +34,34 @@ const TAIL_MAX = 12;
 /** id -> state */
 const states = new Map();
 
+/**
+ * 「源真的监听上了」的订阅者 —— 由 **server.js** 接到聚合层的测速任务上
+ * （源起来后立刻测一轮它的站点，见 `agg/site-test.js` 的 `sourceUp`）。
+ *
+ * 为什么只"广播"、不直接 `require` 聚合层：**source 是最底层**
+ * （`index.js` 的 `upstream: null`，它不消费任何模块），反过来 require 聚合层会把分层弄反。
+ * 所以这里只广播 `id`，接线交给 server.js（与它调 `startAutoUpdate()` 是同一套做法）。
+ */
+const readyListeners = new Set();
+
+/** 订阅"源就绪"；返回取消订阅的函数 */
+function onReady(cb) {
+  if (typeof cb !== 'function') return () => {};
+  readyListeners.add(cb);
+  return () => readyListeners.delete(cb);
+}
+
+/** 广播就绪（订阅者自己出错不影响源） */
+function emitReady(id) {
+  for (const cb of readyListeners) {
+    try {
+      cb(id);
+    } catch {
+      /* 订阅者的错自己吞：源起来了这件事不该被它拖累 */
+    }
+  }
+}
+
 function blankState(id) {
   return {
     id,
@@ -313,8 +341,11 @@ async function waitReady(id) {
 
   /* 期间被别人停了/杀了 / 已经起不来并写好原因了 → 别覆盖人家的状态 */
   if (st.status !== 'starting') {
-    if (st.status === 'running') console.log(`  ✔ 源就绪：${id} :${st.port}`);
-    else if (st.status === 'error') console.log(`  ✘ 源起不来：${id} — ${st.error}`);
+    if (st.status === 'running') {
+      console.log(`  ✔ 源就绪：${id} :${st.port}`);
+      /* 就绪**只广播一次**：这里是唯一收口（`sniffPort` 认出 listening 行后也走这条路） */
+      emitReady(id);
+    } else if (st.status === 'error') console.log(`  ✘ 源起不来：${id} — ${st.error}`);
     return;
   }
 
@@ -431,4 +462,5 @@ module.exports = {
   status,
   publicState,
   findFreePort,
+  onReady,
 };

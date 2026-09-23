@@ -17,7 +17,7 @@
 import { el, toast, modal } from '../../core/dom.js';
 import { S } from '../../core/state.js';
 import { ensureAggSites, ensureAggSources, saveAggSettings, sourcesForDisplay, customSources } from '../../core/store.js';
-import { renderPage, switchPage } from '../../core/shell.js';
+import { renderPage } from '../../core/shell.js';
 
 /** 「添加聚合源」模态框：**手填一个外部地址**（本地部署的源自动就在列表里，不用在这儿加） */
 function openAddSource() {
@@ -122,8 +122,7 @@ export async function renderAggHost(v) {
     el(
       'div',
       { class: 'actions' },
-      el('button', { class: 'btn primary', text: '＋ 添加外部源', onclick: () => openAddSource() }),
-      el('button', { class: 'btn', text: '去部署源', onclick: () => switchPage('source-bundle') })
+      el('button', { class: 'btn primary', text: '＋ 添加外部源', onclick: () => openAddSource() })
     )
   );
 
@@ -146,7 +145,6 @@ export async function renderAggHost(v) {
       /* 没在运行时**不另挂标记** —— 状态列那一句「失败：这个源没在运行（去…启动它）」已经说清了，
        * 再挂一个徽章是同一件事说两遍。 */
       controls.push(el('span', { class: 'badge', text: '本地部署' }));
-      controls.push(el('button', { class: 'btn mini', text: '去管理', onclick: () => switchPage('source-bundle') }));
     } else {
       const chk = el('input', { type: 'checkbox', checked: on });
       chk.addEventListener('change', async () => {

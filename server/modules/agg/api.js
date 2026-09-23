@@ -26,9 +26,11 @@
  */
 const settings = require('../../core/settings');
 const catpaw = require('../../core/catpaw');
+const { request } = require('../../core/upstream');
 const sourceService = require('../source/service');
 const cache = require('./cache');
-const { aggregateSearch, aggregateDetail, playEpisode, selectSites, matchDefaults } = require('./service');
+const siteStats = require('./site-stats');
+const { aggregateSearch, aggregateDetail, playEpisode, selectSites, matchDefaults, ensureInit, detailTimeoutMs, lineFilter: serviceLineFilter } = require('./service');
 
 /** 失败的统一形状（不抛异常：调用方可能是路由，也可能是 emby 层，各自决定怎么呈现） */
 function fail(code, status, message) {
@@ -89,7 +91,16 @@ async function loadSites() {
       } else {
         try {
           const r = await catpaw.fetchSites(s.url);
-          sites = (r.sites || []).map((x) => Object.assign({}, x, { source: s.id, sourceName: s.name || s.url }));
+          sites = (r.sites || []).map((x) =>
+            Object.assign({}, x, {
+              source: s.id,
+              sourceName: s.name || s.url,
+              /* 把**已记下的统计**带上（见 site-stats.js）：界面那一列「延迟」= `stat.home`（测速结果），
+               * title 里的"最近一次真实搜索 / 取详情"= `stat.call.*`（顺手记账）。
+               * 什么都没记过的站点这里是 null，界面显示 `—`（如实，不编）。 */
+              stat: siteStats.view(s.id, x.key),
+            })
+          );
           row.ok = true;
           row.siteCount = sites.length;
         } catch (e) {
@@ -111,23 +122,13 @@ async function loadSites() {
 const liveSources = (sources) => (sources || []).filter((s) => s.ok);
 
 /**
- * Emby **版本列表的线路过滤**（正则，**只匹配线路名** `line.flag`）—— 由 emby 层迁入。
+ * Emby **版本列表的线路过滤**（正则，**只匹配线路名** `line.flag`）。
  *
- * 为什么归聚合层：线路是聚合层产出的东西，过滤规则与它放在一处，才不会出现"配置在 A、生效在 B"。
- * `emby` 层不再读自己的设置，改成调这里（`emby/service.js` 的 `lineFilter()` 就一行转发）。
- *
- * ⚠️ 语义不变：**只影响"列出来的版本"，不影响播放**（`resolveStream` 按版本 Id 回查，不查这个列表）。
- * 规则写错时**不抛**（保存时已校验；这里是运行时兜底）：`re:null + invalid:true`，调用方按"不过滤"走并记日志。
+ * ⚠️ **实现已搬到 `service.js`**：它现在有两处用途、必须同一套判据 ——
+ * emby 层拼版本列表时，与聚合层判断"这条详情对客户端有没有用"时（见 ADR-0025）。
+ * 这里只转发，emby 层照旧调这个入口（`emby/service.js` 的 `lineFilter()` 一行转发）。
  */
-function lineFilter() {
-  const raw = String((settings.read('agg') || {}).lineFilter || '').trim();
-  if (!raw) return { raw: '', re: null, invalid: false };
-  try {
-    return { raw, re: new RegExp(raw, 'i'), invalid: false };
-  } catch {
-    return { raw, re: null, invalid: true };
-  }
-}
+const lineFilter = () => serviceLineFilter();
 
 /* ============================================================
  * 详情快照 + 同键并发合并（表与库见 modules/agg/cache.js）
@@ -143,12 +144,14 @@ const inflightDetail = new Map();
 /**
  * 快照 key = 「问的是什么」+「当时按什么规则问」。
  *
- * 把**规则**（参与站点、源地址、分数线、最多留几条、补打设置、站点顺序）一起拼进去，
- * 是为了让「改了设置」这件事**天然换 key** —— 不必再写一套"设置变更后清缓存"的钩子，
- * 也不会读到按旧规则算出来的结论。
+ * 把**规则**（参与站点、源地址、分数线、最多留几条、补打设置、站点顺序、**线路过滤**）
+ * 一起拼进去，是为了让「改了设置」这件事**天然换 key** —— 不必再写一套"设置变更后清缓存"
+ * 的钩子，也不会读到按旧规则算出来的结论。
  *
- * ⚠️ **线路过滤不进 key**：过滤是在 emby 层拿到结果之后做的（聚合结果本身不带过滤），
- * 所以改过滤规则立刻生效，与快照无关。
+ * ⚠️ **线路过滤进 key**（原先写的是"不进"，现已被 ADR-0025 取代）：它现在参与"这条详情
+ * 对客户端有没有用"的判据（过滤后一条都列不出来 → 不算有用、也不存快照），所以规则一改
+ * 就必须换成另一个 key。代价如实记着：**改规则后第一次请求要重算**（那一趟是秒级的）——
+ * 换来的是不会命中一份"按旧规则判定为有用"的结论。
  */
 function detailCacheKey({ name, year, season, episode, scoped, sources, cfg, opts }) {
   const m = matchDefaults(opts);
@@ -166,26 +169,37 @@ function detailCacheKey({ name, year, season, episode, scoped, sources, cfg, opt
     (sources || []).map((s) => `${s.id}|${s.url || ''}`).sort().join(';'),
     /* 这几项直接决定"命中哪些站"，必须进 key */
     [m.minScore, m.maxItems, m.extraK, extraAll ? 1 : 0, (cfg.order || []).map(pair).join(',')].join('|'),
+    /* 取详情的单站超时（秒）：它决定"这一次哪几条线路取得到"（超时的站那条就没了），
+     * 与线路过滤同理 —— 改了规则就该重算，而不是命中一份按旧超时算出来的结论 */
+    String(Math.round(detailTimeoutMs(cfg) / 1000)),
+    /* 线路过滤的原文（正则）：它决定"这份详情对客户端有没有用"，必须进 key（见上） */
+    String(cfg.lineFilter || '').trim(),
   ].join('\u0001');
 }
 
 /**
  * 什么样的结果才值得存快照。
  *
- * **判据：只要有站拿到了详情（`detailOk > 0`）就存** —— 原先还额外要求「没有站失败」「没有详情失败」，
- * 那两道条件太严：一次网络抖动、或某个慢站超时，整份就不存，而这一趟是 **10 秒级**的活
- * （实测中位 10.8s）。于是客户端点一次播放连着问的那三遍（详情 → 播放信息① → 播放信息②）
- * **每次都白重算**，一次播放要等 20~30 秒 —— 代价比"偶尔少几条线路"大得多。
- * 取舍的完整理由与代价见 docs/adr/0020。
+ * **判据：`stats.usable > 0`** —— 即"至少有一条**过滤后仍能被客户端列出来**的线路"
+ *（有线路、过了线路过滤、且定位到这一集 / 有播放项；由 `service.aggregateDetail` 统计）。
+ *
+ * 这条判据改过两次，两次都是被实测推着走的：
+ *   ① 原先还额外要求「没有站失败」「没有详情失败」，太严：这一趟是 **10 秒级**的活
+ *      （实测中位 10.8s），启用站里只要有一个慢/抖一下整份就不存，于是客户端点一次播放
+ *      连着问的那三遍（详情 → 播放信息① → 播放信息②）**全部重算**，一次播放要等 20~30 秒。
+ *      放宽成"有站拿到详情就存"（`detailOk > 0`）。那次取舍的完整理由与代价见 ADR-0020。
+ *   ② 现在再收一道：**过滤后一条都列不出来 = 对客户端没有用**（ADR-0025）。
+ *      实测症状：某站的 4 条线路被 `/夸克原画/` 全滤掉，客户端 0 个版本，而这份"没用"的
+ *      快照照样存了下来、在那个有效期内一直挡着（客户端反复点开都是 0 版本）。
  *
  * 代价**如实记着**：存下的可能是"缺某个源那几条线路"的半份结果，在那个有效期内点开都会缺它。
  * 所以不让这件事无声无息 —— 存快照那行日志会**点名**这次是哪个源没取到（见下面 `compute()` 里）。
  *
- * 仍然不存**负结果**（`detailOk === 0`：没命中、或全失败）：这两件事在返回值上不好区分，
+ * 仍然不存**负结果**（没命中、或全失败）：这两件事在返回值上不好区分，
  * 分不清就不缓存，每次如实去问（延续 ADR-0008）。
  */
 function cacheableDetail(out) {
-  return ((out.stats || {}).detailOk || 0) > 0;
+  return Number((out.stats || {}).usable) > 0;
 }
 
 /**
@@ -194,6 +208,8 @@ function cacheableDetail(out) {
  * `opts`：`name`（影视名）/ `year`（消歧）/ `season` + `episode`（定位某一集）/
  * `keys`（限定站点 `{source,key}[]`）/ `source`+`site`+`vodId`（快路径：已知绑定就直查，跳过搜索）/
  * `pick`（取法：`items` = 电影，列出每条线路的**全部播放项**；缺省 = 剧集，按季集号定位一条）/
+ * `timeoutMs`（搜索那一步的单站超时，毫秒）/ `detailTimeoutMs`（**取详情**的单站超时，毫秒，
+ * 不传读 `agg.detailTimeoutSec` —— 默认比搜索宽，理由见 service.searchTimeoutMs）/
  * `minScore` + `maxItems`（打分阈值与"最多留几条"，不传就用 `agg.json` 里的设置）；
  * `extraK` / `extraAll`（接续补打：前 N 条没凑够时再往下试几条 / 匹配到底，不传读设置）。
  * **没有 `all`**：命中的站一律全取（见 service.aggregateDetail），
@@ -261,6 +277,7 @@ async function detail(opts = {}) {
       /* 取法：`items` = 电影（每条线路列出全部播放项）；缺省 = 剧集（按季集号定位一条）。 */
       pick: opts.pick,
       timeoutMs: opts.timeoutMs,
+      detailTimeoutMs: opts.detailTimeoutMs,
       minScore: opts.minScore,
       maxItems: opts.maxItems,
       /* 接续补打（不传读设置）：前 N 条没凑够时最多再多试几条（`matchExtraK`）；
@@ -287,7 +304,9 @@ async function detail(opts = {}) {
 
     if (cacheKey) {
       if (!cacheableDetail(out)) {
-        console.log('  · agg 详情不存快照（没有任何站拿到详情 / 没命中）—— 下次仍如实去问');
+        console.log(
+          '  · agg 详情不存快照（没命中 / 没有任何站拿到详情 / **线路过滤后一条能用的都没有**）—— 下次仍如实去问'
+        );
       } else if (cache.putDetail(cacheKey, out)) {
         /* **有站失败也照存**（见 `cacheableDetail`），所以这里必须点名缺了谁 ——
          * 否则"快照里少几条线路"跟"源里本来就没有"长得一模一样，事后无从分辨。 */
@@ -349,6 +368,142 @@ async function play(opts = {}) {
   return out;
 }
 
+/**
+ * 测速用的**固定超时** —— **不读 `agg.timeoutSec`**（那个是给播放/搜索链路的，默认 5 秒）。
+ * 拿 5 秒去测速，慢站会一律被记成"超时"，量到的是设置而不是站；15 秒够容下实测里最慢的
+ * 几发搜索（冷回源 0.4~1s、个别站 5s+），也不至于让一轮测速拖太久。
+ */
+const SPEED_TEST_TIMEOUT_MS = 15000;
+
+/**
+ * 测速用的**探测词**（常见影视名）—— 每次**随机取一个**。
+ *
+ * 为什么要"一组 + 随机"而不是固定一个词：站里**没有**这个词时会回 404 或空列表
+ * （实测 duoduo / huban：有词 200、无词 404），固定一个词等于给每个站预设了
+ * "有没有结果"这个变量；随机取则长期看每个站都会被抽到有结果的词。
+ * 选词口径：各站普遍收录的大众片，动画 / 国剧 / 老剧各占一些（避免整组都是同一类）。
+ */
+const PROBE_WORDS = [
+  '斗破苍穹',
+  '斗罗大陆',
+  '庆余年',
+  '甄嬛传',
+  '西游记',
+  '亮剑',
+  '琅琊榜',
+  '武林外传',
+  '士兵突击',
+  '狂飙',
+  '三体',
+  '人民的名义',
+];
+
+/** 随机取一个探测词；给了 `exclude` 就避开它（"换一个关键词再测"用它） */
+function pickProbeWord(exclude) {
+  const pool = PROBE_WORDS.filter((w) => w !== exclude);
+  const list = pool.length ? pool : PROBE_WORDS;
+  return list[Math.floor(Math.random() * list.length)];
+}
+
+/**
+ * **单站测速**：`POST {api}/search`（关键词随机取），量往返耗时并覆盖统计里的那一槽。
+ *
+ * 为什么是 `/search`：聚合真正走的就是它，只有它的数字对得上"用户会等多久"。
+ * （`/home` 实测虽然普遍可用，但它返回的是**首页分类树** —— huban/duoduo 各 62KB / 208 个分类、
+ * 盘搜类站是空壳 10ms —— 与搜索耗时背离：实测 duoduo 首页 2.0s / 搜索 0.4s、huban 1.4s / 0.1s，
+ * 当"延迟"列会误导，所以不用它。）
+ *
+ * **失败换词再测一发**：非 200（404 / 5xx / 403 …）就换一个探测词重测；**两发都非 200 才算真失败**。
+ * 这样"这站恰好没有那个词"不会被记成一次失败，而真的坏站（两发都失败）会如实标出来。
+ *
+ * **口径与业务刻意不同**（见 `site-stats.js` 顶部）：`200 = 成功`，**列表为空也算**
+ * （它已经尽了搜索的义务）；非 200 记失败并记下状态码；超时 / 网络错记失败。
+ *
+ * `init` 走 `ensureInit()`（与业务同一个函数、同一份缓存）：测速顺带把"已初始化"标记做好，
+ * 业务侧首次搜索不必再多打一次（`initFirst` 开关已删，见 service.js 的 ensureInit）。
+ *
+ * 失败不可怕：`ok:true` 只表示"这次测速动作本身完成了"，站点结论在返回的 `search` 里。
+ * `routeMissing` —— 404 且文案是 `Route POST:… not found`（**源里这个站没实现 /search**，
+ * 不是站坏了）；其余非 200 / 超时 = 上游真实的错（HTTP 404 / 500 / 403 / 超时）。
+ */
+async function probeSearch({ source, key, api, wd, timeoutMs } = {}) {
+  const siteKey = String(key || '').trim();
+  const sourceId = String(source || '').trim();
+  if (!siteKey) return fail('BAD_INPUT', 400, '请提供站点 key');
+  if (!sourceId) return fail('BAD_INPUT', 400, '请提供源 id');
+  const row = listSources().find((s) => s.id === sourceId);
+  if (!row || !row.url) return fail('NO_SOURCE', 400, `源 ${sourceId} 现在不可用（没在运行？）`);
+
+  /* 站的接口前缀：调用方手上一般就有（站点清单里的 `api`），没带就问一次源自己的 /config */
+  let apiPath = String(api || '').trim();
+  if (!apiPath) {
+    try {
+      const r = await catpaw.fetchSites(row.url);
+      const hit = (r.sites || []).find((x) => x.key === siteKey);
+      apiPath = hit ? hit.api : '';
+    } catch (e) {
+      return fail('UPSTREAM_HTTP', 502, '取站点清单失败：' + String((e && e.message) || e));
+    }
+  }
+  if (!apiPath || !apiPath.startsWith('/')) return fail('BAD_INPUT', 400, `认不出站点 ${siteKey} 的接口路径`);
+
+  const timeout = Math.max(1000, Number(timeoutMs) || SPEED_TEST_TIMEOUT_MS);
+  const initCalled = await ensureInit(row, { key: siteKey, api: apiPath }, timeout);
+
+  /** 打一发搜索（`/init` 上面已经处理过，这里不再重复） */
+  const callSearch = async (word) => {
+    const t0 = Date.now();
+    let status = 0;
+    let ok = false;
+    let error = '';
+    let text = '';
+    let body = null;
+    try {
+      const r = await request(row.url, apiPath + '/search', { method: 'POST', body: { wd: word, page: '1' }, timeout });
+      status = r.status;
+      ok = r.ok;
+      text = String(r.text || '');
+      body = r.json;
+      if (!ok) error = 'HTTP ' + r.status;
+    } catch (e) {
+      error = e && e.name === 'AbortError' ? `超时(${timeout}ms)` : String((e && e.message) || e);
+    }
+    const list = (body && Array.isArray(body.list) && body.list) || [];
+    return {
+      wd: word,
+      ms: Date.now() - t0,
+      status,
+      ok,
+      error,
+      count: list.length,
+      /* 源的路由级 404：这个站没实现 /search（文案与上游 404 不同，实测可区分） */
+      routeMissing: status === 404 && /Route POST:/i.test(text),
+      timeout: /^超时/.test(error),
+    };
+  };
+
+  /* 第一发用调用方给的词（缺省随机取一个），非 200 就**换一个词再测一发**（只重试一次） */
+  const first = String(wd || '').trim() || pickProbeWord();
+  const attempts = [await callSearch(first)];
+  if (!attempts[0].ok) attempts.push(await callSearch(pickProbeWord(first)));
+
+  const last = attempts[attempts.length - 1];
+  const tries = attempts.length;
+  siteStats.recordSpeed(sourceId, siteKey, Object.assign({}, last, { tries }));
+
+  return {
+    ok: true,
+    source: sourceId,
+    key: siteKey,
+    name: row.name,
+    timeoutMs: timeout,
+    initCalled,
+    search: Object.assign({}, last, { tries }),
+    attempts,
+    stat: siteStats.view(sourceId, siteKey),
+  };
+}
+
 module.exports = {
   fail,
   lineFilter,
@@ -359,4 +514,7 @@ module.exports = {
   play,
   aggregateSearch,
   selectSites,
+  probeSearch,
+  SPEED_TEST_TIMEOUT_MS,
+  PROBE_WORDS,
 };
