@@ -381,6 +381,15 @@ function requestRestart(to) {
 
 /* ------------------------------------------------------------------ 对外 */
 
+/**
+ * 仓库地址 —— 面板界面上要引用它（「设置 → 关于」的链接、Release 链接）。
+ * **唯一来源就是这里**（`APP_REPO` 环境变量可覆盖，改名/换仓库只改一处）。
+ * 单独一个函数是为了让调用方不必为了拿个链接去跑一次 `status()`（那个会打 GitHub）。
+ */
+function repoInfo() {
+  return { repo: REPO, repoUrl: `https://github.com/${REPO}` };
+}
+
 async function status({ force = false } = {}) {
   const current = String(pkg.version || '');
   const installed = listInstalled();
@@ -424,6 +433,7 @@ module.exports = {
   resolveLatestInfo,
   isManaged,
   listInstalled,
+  repoInfo,
   /* 清理：`pruneOnBoot` 是 `server.js` 启动成功后调的那个；`pruneVersions` 供排障与自测直接调用 */
   pruneVersions,
   pruneOnBoot,

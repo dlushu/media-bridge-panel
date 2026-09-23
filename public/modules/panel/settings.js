@@ -10,10 +10,13 @@
  *   · 缓存设置       **跨两个库**的用量与清空（`data/cache/tmdb.db` + `data/emby/cache.db`），
  *                    端点 `GET|DELETE /api/panel/cache`，策略存 `panel.json` 的 `cache.*`（见 core/cachedb.js）
  *   · 面板密码        改密码（见 core/auth.js）+ 退出登录
+ *   · 关于            名称 / 版本 / 代码仓库地址（GET /api/panel/info；仓库地址的唯一来源是
+ *                    update.js 的 REPO，可用 APP_REPO 覆盖）
  */
-import { el, toast, fmtTime, codeBlock } from '../../core/dom.js';
+import { el, toast, fmtTime, codeBlock, modal } from '../../core/dom.js';
 import { api } from '../../core/api.js';
 import { S } from '../../core/state.js';
+import { BRAND } from '../../core/branding.js';
 import { authStatus, changePassword, logout } from '../../core/auth.js';
 import { loadAll } from '../../core/boot.js';
 import { renderPage } from '../../core/shell.js';
@@ -65,16 +68,43 @@ function updateCard() {
   const mode = el('span', { class: 'v', text: '未知' });
   const check = el('button', { class: 'btn', text: '检查更新' });
   const install = el('button', { class: 'btn primary hidden' });
+  /* 有新版本时才有：把该版本的更新内容（Release 说明 = CHANGELOG 里那一节）**弹窗**展示 */
+  const notes = el('button', { class: 'btn hidden', text: '查看更新内容' });
   const result = el('div', { class: 'hint' });
   const versions = el('div', { class: 'note' });
-  /* 有新版本时在这里显示该版本的更新内容（Release 说明 = CHANGELOG 里那一节） */
-  const notesBox = el('div', { class: 'hidden' });
   let last = null; // 最近一次 GET /api/panel/update 的结果
 
   const showResult = (cls, lines) => {
     result.className = cls;
     result.replaceChildren(...lines.map((t) => el('div', { text: t })));
   };
+
+  /**
+   * 更新内容弹窗。用弹窗而不是摊在卡片里：说明动辄几十行，摊开会把卡片撑得很长、
+   * 还得往下滚才看得见「更新到 x」那个按钮。框里同时给 GitHub 上那个 Release 的链接。
+   * 该版本没写说明时**如实说一句**，不留白 —— 否则看着像前端忘了显示。
+   */
+  const showNotes = (r) => {
+    if (!r) return;
+    const title = `更新内容 · ${r.latest || ''}${r.publishedAt ? ` · 发布 ${fmtTime(r.publishedAt)}` : ''}`;
+    const body = [];
+    if (r.notes) body.push(codeBlock({ label: 'Release 说明', code: r.notes }));
+    else body.push(el('div', { class: 'note', text: `这个版本（${r.latest}）的 Release 没有写更新说明。` }));
+    if (r.notesUrl) {
+      body.push(
+        el(
+          'div',
+          { class: 'note' },
+          '来源：',
+          el('a', { href: r.notesUrl, target: '_blank', rel: 'noreferrer', text: 'GitHub 上的这个 Release' }),
+          '（说明摘在该 Release 页与 CHANGELOG 里）'
+        )
+      );
+    }
+    modal({ title, body, actions: [{ label: '知道了' }] });
+  };
+
+  notes.addEventListener('click', () => showNotes(last));
 
   const paint = (r) => {
     last = r;
@@ -110,39 +140,20 @@ function updateCard() {
     }
     showResult(cls, lines);
 
-    /* 有新版本 → 顺带把"这次更新会带来什么"显示出来（说明取自 Release，即 CHANGELOG 里那一节）。
-     * 该版本没写说明时**如实说一句**，不留白 —— 否则看着像前端忘了显示。 */
-    notesBox.replaceChildren();
-    const showNotes = hasNew && !!(r.notes || r.notesUrl);
-    notesBox.classList.toggle('hidden', !showNotes);
-    if (showNotes) {
-      if (r.notes) {
-        notesBox.append(
-          codeBlock({
-            label: `更新内容 · ${r.latest}${r.publishedAt ? ` · 发布 ${fmtTime(r.publishedAt)}` : ''}`,
-            code: r.notes,
-          })
-        );
-      } else {
-        notesBox.append(el('div', { class: 'note', text: `这个版本（${r.latest}）的 Release 没有写更新说明。` }));
-      }
-      if (r.notesUrl) {
-        notesBox.append(
-          el(
-            'div',
-            { class: 'note' },
-            el('a', { href: r.notesUrl, target: '_blank', rel: 'noreferrer', text: '在 GitHub 上打开这个 Release' })
-          )
-        );
-      }
-    }
+    /* 有新版本 → 给一个「查看更新内容」入口（点开是弹窗，见 showNotes）。
+     * 说明只在有新版本时才有意义，所以跟 install 一起显隐。 */
+    notes.classList.toggle('hidden', !hasNew);
   };
 
   const load = async (loud) => {
     check.disabled = true;
     check.innerHTML = '<span class="spinner"></span> 检查中…';
     try {
-      paint(await api('/api/panel/update'));
+      const r = await api('/api/panel/update');
+      paint(r);
+      /* 手动点「检查更新」查到新版本时**直接把更新内容弹出来**（那一下点击就是"想看什么更新"的意图）；
+       * 打开页面那次（loud=false）不弹 —— 一进页面就糊一个弹窗很烦。 */
+      if (loud && r.managed && r.hasUpdate && r.latest) showNotes(r);
     } catch (e) {
       showResult('hint warn', ['检查更新失败：' + e.message]);
       if (loud) toast('检查更新失败：' + e.message, true);
@@ -199,17 +210,58 @@ function updateCard() {
     el('h3', { text: '版本与更新' }),
     el('p', {
       class: 'note',
-      text: '面板可以从 Release 安装新版本，安装后应用进程会重启（容器不停）。更新只由你手动触发，不会在后台自动进行。更新即完整替换：新版本起来后，旧版本目录会被清掉。',
+      text: '面板可以从 Release 安装新版本，安装后应用进程会重启（容器不停）。更新只由你手动触发，不会在后台自动进行。更新即完整替换：新版本起来后，旧版本目录会被清掉。仓库地址见下面「关于」那张卡。',
     }),
     el('div', { class: 'kv' }, el('span', { class: 'k', text: '当前版本' }), cur),
     el('div', { class: 'kv' }, el('span', { class: 'k', text: '最新版本' }), latest),
     el('div', { class: 'kv' }, el('span', { class: 'k', text: '运行方式' }), mode),
-    el('div', { class: 'row' }, check, install),
+    el('div', { class: 'row' }, check, install, notes),
     result,
-    versions,
-    notesBox
+    versions
   );
   load(false);
+  return card;
+}
+
+/* ------------------------------------------------------------------------ 关于 */
+
+/**
+ * 「关于」卡：面板叫什么、什么版本、代码在哪儿。
+ * 仓库地址**来自后端**（`/api/panel/info` 的 `repo`/`repoUrl`，唯一来源是 update.js 的 REPO，
+ * `APP_REPO` 可覆盖）—— 前端不写死，换仓库/自建时不用改前端。
+ */
+function aboutCard() {
+  const name = el('span', { class: 'v', text: BRAND.panelName });
+  const ver = el('span', { class: 'v', text: '…' });
+  const repo = el('span', { class: 'v', text: '…' });
+  const card = el(
+    'div',
+    { class: 'card' },
+    el('h3', { text: '关于' }),
+    el('div', { class: 'kv' }, el('span', { class: 'k', text: '名称' }), name),
+    el('div', { class: 'kv' }, el('span', { class: 'k', text: '版本' }), ver),
+    el('div', { class: 'kv' }, el('span', { class: 'k', text: '代码仓库' }), repo),
+    el('p', {
+      class: 'note',
+      text: '面板按这个仓库的 Release 更新（资产 + sha256 校验，见上面「版本与更新」）；每个版本的更新说明都写在该 Release 页与仓库的 CHANGELOG 里。',
+    })
+  );
+
+  api('/api/panel/info')
+    .then((info) => {
+      name.textContent = BRAND.panelName;
+      ver.textContent = info.version || '-';
+      repo.replaceChildren(
+        info.repoUrl
+          ? el('a', { href: info.repoUrl, target: '_blank', rel: 'noreferrer', text: info.repo || info.repoUrl })
+          : el('span', { text: '（未设置）' })
+      );
+    })
+    .catch((e) => {
+      ver.textContent = '-';
+      repo.textContent = '取仓库地址失败：' + e.message;
+    });
+
   return card;
 }
 
@@ -694,7 +746,7 @@ function passwordCard() {
 
 export function renderPanelSettings(v) {
   const first = updateCard();
-  v.append(first, backupCard(), passwordCard());
+  v.append(first, backupCard(), passwordCard(), aboutCard());
   /* TMDB 卡与缓存卡都要异步读一次设置，各自往 v 末尾插，不挡上面的卡。
    * ⚠️ 两张卡共用一个 `S.panel.settings`：`cacheSection` 在 `tmdbSection` 之后跑，
    * 那时设置已经读回来了（若没读到它会自己再读一次），不会出现"缓存卡拿着空设置"的情况。 */

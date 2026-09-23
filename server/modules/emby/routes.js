@@ -18,6 +18,8 @@
  *   GET  /api/emby/videos|Videos/{ItemId}/stream[.{ext}]  直连播放（**Emby 标准端点**：实测客户端播直连时
  *                                                走的是这条 + MediaSourceId，而不是上面那条 Path；
  *                                                两种大小写都注册 —— 小写是早期日志实录，大写是 Emby 官方路径）
+ *   GET  /api/emby/Items/{ItemId}/Download       下载（与拉流**同一条链路**：MediaSourceId → 现取地址 → 302；
+ *                                                302 之后文件名/断点续传归源站，面板不扛流量）
  *   GET  /api/emby/Shows/{Id}/Seasons        剧的季列表（**占位**：TMDB 的 seasons[]；UserId 在 query 里）
  *   GET  /api/emby/Shows/{Id}/Episodes       某一季的分集（**占位**：TMDB season 接口；UserId/SeasonId 在 query 里）
  *   GET  /api/emby/Items/{Id}/Images/{type}  图片（**豁免 token**；tag = `cpimg.<base64url(URL)>.<签名>`，验签不过 404；支持 `/Images/{type}/{index}`）
@@ -81,15 +83,17 @@ function notImplemented(req, res, { pathname, query, body }) {
  * 把 `resolveStream` 的结果落到响应上：**一律 302**（不再有"面板代为转发"那条路）。
  * 面板只回一个 `Location`，字节全在源与客户端之间跑 —— 见 service.resolveStream 上面那段说明。
  * 本地部署的源回的地址是回环地址，这里拿到的已经是**换过域名**的那份（见 service.redirectUrl）。
+ *
+ * `verb` 只进日志那行（拉流 / 下载）：两个端点共用这一段，日志里得能分清是哪条在跑。
  */
-function serveStream(req, res, out, label) {
+function serveStream(req, res, out, label, verb = '拉流') {
   if (!out.stream) {
-    /* 拉流失败时把**客户端原始 URL** 一起打出来 —— 光看状态行根本不知道它回传了什么
+    /* 失败时把**客户端原始 URL** 一起打出来 —— 光看状态行根本不知道它回传了什么
      * `MediaSourceId`（排查"缺少 vod"时就卡在这）。**只在失败时打**，所以并成一行。 */
-    log.logResult(req, `拉流 ${label}`, out, out.status >= 400 ? ` 原始请求: ${req.url}` : '');
+    log.logResult(req, `${verb} ${label}`, out, out.status >= 400 ? ` 原始请求: ${req.url}` : '');
     return sendJson(res, out.status, out.body);
   }
-  log.logResult(req, `拉流 ${label}`, { status: 302, log: out.log });
+  log.logResult(req, `${verb} ${label}`, { status: 302, log: out.log });
   res.writeHead(302, { Location: out.stream.url, 'Cache-Control': 'no-store' });
   return res.end();
 }
@@ -408,6 +412,38 @@ module.exports = function routes(r) {
    * 先白吃一个 501，随后才退回小写拿到 302）。同一条实现，不复制逻辑。 */
   r.add('GET', '/api/emby/videos/:itemId/:file', serveDirectVideo);
   r.add('GET', '/api/emby/Videos/:itemId/:file', serveDirectVideo);
+
+  /**
+   * 下载：`GET /api/emby/Items/{ItemId}/Download?MediaSourceId=<版本 Id>&DeviceId=…`。
+   *
+   * 实测（SenPlayer/6.2.1，三体 S1E2）12 小时里试了 **8 次**，每次都落进通配的 501 → 它就一直重试。
+   * 这条端点要的东西**和拉流一模一样**：`MediaSourceId` 里已经编着 站点/线路/vod，所以直接复用
+   * `resolveStream` → `serveStream`（同一条链路、同一次上游取地址），不新增任何取数逻辑。
+   *
+   * ⚠️ **302 之后由源站应答**：`Content-Disposition`（文件名）、`Content-Type`、断点续传全是源站说了算，
+   * 面板改不了。要"片名.S01E01.mkv"那种漂亮文件名，只能在面板里代为转发**全量字节**并自己写
+   * `Content-Disposition` —— 那与「面板不扛流量」（ADR-0006）直接冲突，本实现不做。
+   *
+   * 同族的 `Items/{ItemId}/File`（也是下载）**先不做**：客户端日志里从没出现过，
+   * 按"等客户端日志暴露再接线"的老规矩办 —— 出现了再加一条同样的路由即可。
+   */
+  r.add('GET', '/api/emby/Items/:itemId/Download', async (req, res, { params, query }) => {
+    /* AccessToken 守卫（见 service.authorize）：无效/缺失一律 401 */
+    const denied = service.authorize(req, query.get('UserId'));
+    if (denied) {
+      log.logResult(req, `下载 Items/${params.itemId}/Download`, denied);
+      return sendJson(res, denied.status, denied.body);
+    }
+
+    const out = await service.resolveStream(
+      params.itemId,
+      query.get('MediaSourceId'),
+      null, // vod 已编码在 MediaSourceId 里，不需要另外传
+      query.get('UserId'),
+      req.headers.host || '' // 本地部署的源回的地址是回环地址，302 前要用它换成客户端那个域名
+    );
+    return serveStream(req, res, out, `Items/${params.itemId}/Download`, '下载');
+  });
 
   /* 相似推荐：按条目的 tmdb 坐标反查 TMDB（与季/集同类，归 emby 层，不走首页模块） */
   r.add('GET', '/api/emby/Items/:itemId/Similar', async (req, res, { params, query }) => {

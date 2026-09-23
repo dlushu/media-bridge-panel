@@ -32,7 +32,7 @@
 | GET | `/api/meta` | 服务自述：`{service:"catpaw-panel", version, node, modules}`；外部可据此确认一个地址是否为本面板 |
 | GET | `/api/modules` | 模块总览：每个模块的 `apiPrefix`、`upstream` 与当前 `upstreamUrl` |
 | GET/PUT/DELETE | `/api/modules/:id/settings` | 读写/重置某模块的设置（新增模块不需要改动此端点） |
-| GET | `/api/panel/info` | 版本、Node、数据目录、模块列表 |
+| GET | `/api/panel/info` | 版本、Node、数据目录、模块列表，以及**仓库地址**（`repo` / `repoUrl` —— 面板「设置 → 关于」与 Release 链接用它，唯一来源是 `panel/update.js` 的 `REPO`，`APP_REPO` 可覆盖） |
 | GET | `/api/panel/backup` | 导出配置（`settings/*.json` + 源清单；**不含**带 cookie/token 的 `runtime/`） |
 | POST | `/api/panel/restore` | 恢复配置（只写模块设置，不改动本机源清单） |
 | POST | `/api/panel/tmdb/test` | 测试 TMDB 设置（面板「TMDB 设置 → 测试」）。原先位于 `/api/emby/tmdb/test`，已随配置迁到面板层 |

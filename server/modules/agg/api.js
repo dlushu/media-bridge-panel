@@ -170,18 +170,22 @@ function detailCacheKey({ name, year, season, episode, scoped, sources, cfg, opt
 }
 
 /**
- * 什么样的结果才值得存快照 —— 两条都遵循「宁可下次再打一趟源，也不给旧结论」：
+ * 什么样的结果才值得存快照。
  *
- *   ① **有站失败就不存**：一次网络抖动会被存住，之后整个 TTL 内每次点开都少那几条线路，
- *      而且日志上看不出来（结果长得和"源里就是没有"一样）。
- *   ② **负结果不存**：`detailOk === 0` 表示"没命中"或"全失败"，这两件事在返回值上不好区分 ——
- *      分不清就不缓存，每次如实去问。
+ * **判据：只要有站拿到了详情（`detailOk > 0`）就存** —— 原先还额外要求「没有站失败」「没有详情失败」，
+ * 那两道条件太严：一次网络抖动、或某个慢站超时，整份就不存，而这一趟是 **10 秒级**的活
+ * （实测中位 10.8s）。于是客户端点一次播放连着问的那三遍（详情 → 播放信息① → 播放信息②）
+ * **每次都白重算**，一次播放要等 20~30 秒 —— 代价比"偶尔少几条线路"大得多。
+ * 取舍的完整理由与代价见 docs/adr/0020。
+ *
+ * 代价**如实记着**：存下的可能是"缺某个源那几条线路"的半份结果，在那个有效期内点开都会缺它。
+ * 所以不让这件事无声无息 —— 存快照那行日志会**点名**这次是哪个源没取到（见下面 `compute()` 里）。
+ *
+ * 仍然不存**负结果**（`detailOk === 0`：没命中、或全失败）：这两件事在返回值上不好区分，
+ * 分不清就不缓存，每次如实去问（延续 ADR-0008）。
  */
 function cacheableDetail(out) {
-  const s = out.stats || {};
-  if (!(s.detailOk > 0)) return false;
-  if ((s.detailFailed || 0) > 0) return false;
-  return !(out.sites || []).some((x) => x && x.ok === false);
+  return ((out.stats || {}).detailOk || 0) > 0;
 }
 
 /**
@@ -283,9 +287,20 @@ async function detail(opts = {}) {
 
     if (cacheKey) {
       if (!cacheableDetail(out)) {
-        console.log('  · agg 详情不存快照（有站失败 / 没拿到详情 / 没命中）—— 下次仍如实去问');
+        console.log('  · agg 详情不存快照（没有任何站拿到详情 / 没命中）—— 下次仍如实去问');
       } else if (cache.putDetail(cacheKey, out)) {
-        console.log(`  ✔ agg 详情已存快照（${(out.sites || []).length} 站；有效期见「面板设置 → 缓存设置」）`);
+        /* **有站失败也照存**（见 `cacheableDetail`），所以这里必须点名缺了谁 ——
+         * 否则"快照里少几条线路"跟"源里本来就没有"长得一模一样，事后无从分辨。 */
+        const s = out.stats || {};
+        const bad = (out.sites || []).filter((x) => x && x.ok === false).map((x) => x.name || x.key);
+        const miss = [];
+        if (bad.length) miss.push(`${bad.length} 个源没搜到（${bad.slice(0, 4).join(' / ')}${bad.length > 4 ? ' …' : ''}）`);
+        if (Number(s.detailFailed)) miss.push(`${s.detailFailed} 条详情没取到`);
+        console.log(
+          `  ✔ agg 详情已存快照（${(out.sites || []).length} 站` +
+            (miss.length ? `；⚠️ 但不完整：${miss.join('，')} —— 这份快照里没有它们的线路` : '') +
+            `；有效期见「面板设置 → 缓存设置」）`
+        );
       } else {
         console.log('  · agg 详情没存快照（「缓存设置 → 聚合详情」的有效期填了 0 = 不缓存）');
       }

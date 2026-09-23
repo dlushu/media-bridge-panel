@@ -195,6 +195,8 @@ module.exports = function routes(r) {
       node: process.version,
       dataDir: DATA_DIR,
       settingsDir: SETTINGS_DIR,
+      /* 仓库地址（「设置 → 关于」与「版本与更新」的 Release 链接都用它，见 update.js 的 repoInfo） */
+      ...update.repoInfo(),
       modules: registry.describe(settings.read),
     })
   );

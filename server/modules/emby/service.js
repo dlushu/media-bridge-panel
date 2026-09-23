@@ -770,6 +770,9 @@ function homeViewItem(r) {
     /* `DateModified` 真机 25/25 全是这个值 —— Emby 里"从未修改"的零值，照给。 */
     DateModified: ZERO_STAMP,
     CanDelete: false,
+    /* ⚠️ **库这一条保持 `false`**：`CanDownload` 说的是"这个条目本身能下"，而库是个
+     * `CollectionFolder` 文件夹 —— 下不了（真机这里也是 false）。
+     * 要下的是**条目**，那条在 `baseItem()` 里给 `true`（见那个函数）。 */
     CanDownload: false,
     PresentationUniqueKey: guid,
     SortName: name,
@@ -2941,7 +2944,9 @@ function baseItem(f) {
   item.LockData = false;
   item.LockedFields = [];
   item.CanDelete = false;
-  item.CanDownload = false;
+  /* 与握手 policy 对齐（`EnableContentDownloading: true`），而且 `Items/{ItemId}/Download` 真做了 ——
+   * 这两处必须一致，否则客户端"说支持又不给下"。`CanDelete` 保持 false（删除确实没有）。 */
+  item.CanDownload = true;
   item.LocalTrailerCount = 0;
   /* 真机**电影**条目两处（列表 + 详情）都带它 = 0；本层确实没有预告片/花絮这类附加内容，
    * 所以 0 是真话。（真机的**剧集**条目不给这个字段，给了也无害 —— 真机自己都不保证有。） */

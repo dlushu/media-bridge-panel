@@ -140,7 +140,7 @@ async function searchSite(source, site, wd, page, timeoutMs) {
 async function aggregateSearch(sources, sites, { wd, page = '1', timeoutMs, concurrency, want, matchOptions } = {}) {
   if (!wd || !String(wd).trim()) throw new Error('请提供搜索关键字 wd');
   const cfg = settings.read('agg');
-  const t = Math.max(1000, Number(timeoutMs) || cfg.timeoutMs || 12000);
+  const t = Math.max(1000, Number(timeoutMs) || cfg.timeoutMs || 5000);
   const c = Math.max(1, Math.min(32, Number(concurrency) || cfg.concurrency || 8));
   const byId = sourceMap(sources);
   const queue = (sites || []).slice();
@@ -666,7 +666,7 @@ async function fetchDetail(source, site, vodId, timeoutMs, season, episode, pick
 async function aggregateDetail(sources, sites, opts = {}) {
   const cfg = settings.read('agg');
   const byId = sourceMap(sources);
-  const timeoutMs = Math.max(1000, Number(opts.timeoutMs) || cfg.timeoutMs || 12000);
+  const timeoutMs = Math.max(1000, Number(opts.timeoutMs) || cfg.timeoutMs || 5000);
   const t0 = Date.now();
   const out = {
     name: String(opts.name || ''),
@@ -943,7 +943,7 @@ const NON_HTTP_URL = /^(push|magnet|ed2k|thunder|ftp|rtmp):/i;
 async function playEpisode(sources, sites, opts = {}) {
   const cfg = settings.read('agg');
   const byId = sourceMap(sources);
-  const timeoutMs = Math.max(1000, Number(opts.timeoutMs) || cfg.timeoutMs || 12000);
+  const timeoutMs = Math.max(1000, Number(opts.timeoutMs) || cfg.timeoutMs || 5000);
   const t0 = Date.now();
   const site = siteByKey(sites, opts.source, opts.site);
   const done = (payload) => Object.assign({ source: opts.source, site: opts.site, flag: opts.flag, elapsedMs: Date.now() - t0 }, payload);

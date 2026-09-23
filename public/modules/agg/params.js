@@ -32,7 +32,7 @@ export async function renderAggParams(v) {
   const num = (v2, d) => (v2 === undefined || v2 === null ? d : v2);
 
   /* ---- 聚合参数 ---- */
-  const to = el('input', { type: 'number', class: 'w-lg', value: String(num(agg.timeoutMs, 12000)), min: '1000', step: '1000' });
+  const to = el('input', { type: 'number', class: 'w-lg', value: String(num(agg.timeoutMs, 5000)), min: '1000', step: '1000' });
   const cc = el('input', { type: 'number', class: 'w-xs', value: String(num(agg.concurrency, 8)), min: '1', max: '32' });
   const initCb = el('input', { type: 'checkbox', checked: agg.initFirst !== false });
   const saveBtn = el('button', { class: 'btn primary', text: '保存参数' });
@@ -40,7 +40,7 @@ export async function renderAggParams(v) {
     saveBtn.disabled = true;
     try {
       await saveAggSettings({
-        timeoutMs: Math.max(1000, Number(to.value) || 12000),
+        timeoutMs: Math.max(1000, Number(to.value) || 5000),
         concurrency: Math.max(1, Math.min(32, Number(cc.value) || 8)),
         initFirst: initCb.checked,
       });
@@ -63,12 +63,6 @@ export async function renderAggParams(v) {
       el('label', { class: 'chk', title: '有的站源要先 POST 一次 /init 才能搜；打开后按「源地址 + 站点」缓存，不是每次请求都打' }, initCb, '首次搜索先 POST /init'),
       saveBtn
     ),
-    el('div', {
-      class: 'note',
-      text:
-        '单站超时按最慢的站源设：有的站源（如 duoduo）单次要 15s+，设小了会被判为失败。' +
-        '并发数建议 3~8，太高容易被源站限速。',
-    })
   );
 
   /* ---- 打分设置 ---- */
@@ -76,7 +70,7 @@ export async function renderAggParams(v) {
   const maxItems = el('input', { type: 'number', class: 'w-md', value: String(num(agg.matchMaxItems, 3)), min: '1', max: '20' });
   /* 接续补打：前 N 条没凑够 N 条能用的（空壳 / 定位不到这一集）时，按分数继续往下打，
    * 最多再多试 K 条，**凑够 N 条就停**（想"一直打到底"就勾下面的开关）。 */
-  const extraK = el('input', { type: 'number', class: 'w-md', value: String(num(agg.matchExtraK, 3)), min: '0', max: '10' });
+  const extraK = el('input', { type: 'number', class: 'w-md', value: String(num(agg.matchExtraK, 8)), min: '0', max: '10' });
   const extraAllCb = el('input', { type: 'checkbox', checked: agg.matchExtraAll === true });
   /* 「匹配到底」勾上时 K 就不生效了 —— 二者冲突，所以勾上时直接隐藏 K 那一格
    * （`title` 里也写了二者互斥）。 */

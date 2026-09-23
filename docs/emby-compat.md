@@ -45,7 +45,7 @@
 
 | 结果 | 记哪些 |
 |---|---|
-| 成功 | 2xx：握手 / 登录 / 取用户资料 / 媒体库列表 / 条目列表 / 最新条目 / 详情 / 季集 / 相似 / 播放信息 / 拉流 302 / 出图 200 / 账号列表 |
+| 成功 | 2xx：握手 / 登录 / 取用户资料 / 媒体库列表 / 条目列表 / 最新条目 / 详情 / 季集 / 相似 / 播放信息 / 拉流 302 / 下载 302 / 出图 200 / 账号列表 |
 | 失败 | ≥400：401 没带 token、404 认不出的 Id、502 上游挂了、504 超时、400 参数不合法 |
 | 失败 | 未实现端点（501 通配），行首是 `未实现#N` |
 | 成功 / 失败 | 面板自用端点的**增删改**（账号增改删、TMDB 测试、清空缓存）—— 那是动凭据 / 动缓存的动作，留审计 |
@@ -214,6 +214,7 @@ docker logs -t media-bridge-panel              # 带时间戳
 | POST | `/api/emby/Items/{ItemId}/PlaybackInfo` | 路径参数 `ItemId`（**必须是集或电影**）；`UserId` 在 query（可缺） | 200 `{MediaSources:[…], PlaySessionId}`：每条线路一个版本，`Id` = `catpaw:` + base64url(JSON `{s,t,f,v}`)（客户端播直连时回传的 `MediaSourceId` 就是它 —— **vod 编在里面**，拉流那一格才不用回头再搜一次；**为什么必须编码**见下面「线路 + 源绑定」那条，一句话：线路名里的 `#` 会被 URL 当锚点吃掉）、**`Path` 指向本面板的 Stream 端点**（稳定坐标，不含时效 token；实测客户端**不读它**，走 `videos/{Id}/stream.{ext}`）、`RequiredHttpHeaders:{}`、**`Container`/`Size`/`RunTimeTicks`/`MediaStreams`（编码/分辨率/HDR，来自源在集名里的标注）**；Id 不是集 → 404；TMDB / 聚合失败 → 照实回 | 部署者指定（客户端点播放前必来） |
 | GET | `/api/emby/Items/{ItemId}/Stream` | 两种形状：**① `Path` 用的** `/Stream/{token}[/{文件名}]`（`token` = base64url 的版本 Id，自带站点/线路/vod；末段文件名只为版本行副标题）；**② 手工调试** `?src=<版本 Id>`（新的 base64url，或旧版明文 `catpaw:<站点>:<线路>[\|<vod>]`，`parseCatpawSourceId()` 两种都拆）、`vod` 可缺（src 里自带就用自带的）。两种都可带 `UserId`（可选，**有就校验**） | **一律 302**（"面板代为转发"那条路已删，见下面「拉流」一节）；`src` 认不出 → 400、两个来源都没有 vod → 400；Id 非集 / 定位不到这一集 → 404；聚合或 play 失败 → 502（照搬上游码）；`push://` 之类非直连 → 501 | 部署者指定（拉流最后一格；**实测客户端走的是下一行那条**，这条留作备用/调试） |
 | GET | `/api/emby/videos|Videos/{ItemId}/stream[.{扩展名}]` | 路径参数 `ItemId`（集/电影）；**`MediaSourceId=<版本 Id>`（必填，base64url 的 Id，vod 编在里面）**、`Static=true`/`PlaySessionId`/`api_key`/`X-Emby-Token`（**query 里忽略**，只在请求头里认）；面板自己发出去的 `DirectStreamUrl` / `Path` 带的是 query 的 **`api_key`**（真机也有 `AddApiKeyToDirectStreamUrl` 这个取向）—— 写成 `X-Emby-Token` 等于没带，客户端自己会带头所以看不出差别，但把 URL 交给外部播放器/投屏时就会 401；扩展名来自 `MediaSource.Container`（实测 `stream.mkv`） | 与上一行**同一条实现**（路由层共用 `serveStream`）：**一律 302**；`MediaSourceId` 认不出 → 400；`:file` 不是 `stream[.ext]` → **501**（记日志，`original.{ext}` 未见过不提前实现） | **实测要求**（日志 emby#39~#45：客户端播直连打的是**这条**，不是 `Path`）。**两种大小写都注册**：路由区分大小写，而 Emby 官方路径是**大写** `Videos` —— 实测 Lumenic/1.0.0 打的是大写（先白吃一个 501，随后才退回小写拿到 302） |
+| GET | `/api/emby/Items/{ItemId}/Download` | 路径参数 `ItemId`（集/电影）；**`MediaSourceId=<版本 Id>`（必填，base64url 的 Id，vod 编在里面）**、`DeviceId`/`PlaySessionId`（忽略）；`UserId` 可选（**有就校验**），token 三种带法都认 | **一律 302**（与拉流**同一条实现** —— 路由层共用 `serveStream`，只是日志那行写「下载」）；`MediaSourceId` 认不出 → 400；Id 非集 / 定位不到这一集 → 404；聚合或 play 失败 → 502（照搬上游码）。⚠️ 302 之后 `Content-Disposition`（文件名）/`Content-Type`/断点续传**全由源站决定**，面板改不了 —— 要「片名.S01E01.mkv」那种名字只能代为转发全量字节，与 [ADR-0006](adr/0006-redirect-for-playback.md)「面板不扛流量」冲突，故不做 | 客户端实测（SenPlayer/6.2.1 12 小时里试 8 次、每次吃 501 → 一直重试）。同族的 `Items/{ItemId}/File` 日志里**没出现过**，按"等客户端日志暴露再接线"**先不做** |
 | GET | `/api/emby/Items/{ItemId}/Images/{type}[/{index}]` | 路径参数 `ItemId`（面板发出去的条目 Id）、`type`（`Primary`/`Backdrop`/`Logo`…）、`index`（多张背景图时客户端逐张要；**忽略**）；query `tag`（**本面板签发的签名 tag —— 本侧的唯一取图凭证**）、`maxWidth`/`quality`/`ImageTypeLimit`（忽略） | **200 图片字节**（面板代为取图，`Content-Type` 照上游）；`tag` 缺失/验签不过 → **404**；取图失败 → 502。**豁免 AccessToken**；tag = `cpimg.<base64url(图片URL)>.<签名>`。官方把 `Tag` 定义为**可选**（只影响缓存强弱），但直链只存在于 tag 里，故**认不出即 404**；按 `Id` 反查 TMDB 的兜底**已拆除**（见下「图片」那条） | **实测要求**（客户端点开条目后随即请求 `Images/Primary` / `Images/Backdrop`，且**不带任何凭证**；`/index` 形状随多张背景图一并加上，**待实测**） |
 | GET | `/api/emby/Items/{ItemId}/Similar` | 路径参数 `ItemId`（面板发出去的 tmdb Id）；`UserId` 在 query（同样校验）、`Limit`（切前 N 条）、`Fields`（忽略） | 200 `QueryResult<BaseItemDto>`：**TMDB 的相似推荐**（`recommendations`，与详情**同一次请求**就拿到）；Id 认不出 → 404；TMDB 失败 → 照实回失败码。**响应形状按 QueryResult 实现、待客户端实测复核**（若客户端不渲染，第一个要试的是 `RecommendationDto[]` 那种分组形状） | 部署者指定（**归 emby 层** —— 按坐标反查 TMDB，与季/集同类；不是"有什么"，所以不走首页模块） |
 
@@ -258,7 +259,7 @@ docker logs -t media-bridge-panel              # 带时间戳
   - 停用/启用的插件行即时生效（Views 每次现读 registry），客户端可能要**重启或清缓存**才会刷新库列表。
 - **AccessToken 校验（已实现）**：登录发的 token 落 `data/emby/emby.db` 的 `sessions` 表，之后每个受保护端点都校验它 —— **没有"宽松/严格"之分，校验就是校验**（拿不到有效 token 一律 401，与官方对 401 的定义一致：token 无效或被吊销，客户端应回登录界面）。
   - **三种带法都认**（`service.tokenFrom`）：头 `X-Emby-Token`（官方文档写明的标准带法）、`X-Emby-Authorization` / `Authorization` 里的 `Token="…"`、query `api_key=`（官方把它归为 API Key 认证，可实测客户端把**用户 token** 也塞在这个槽里拉流）
-  - **保护范围**：`Users/{id}` / `Views` / `Items` / `Items/Latest` / `Items/{id}`（详情）/ `Shows/*/Seasons` / `Shows/*/Episodes` / `PlaybackInfo` / `Stream`×2 / `videos/*`，共 11 条。请求里带了 `UserId` 时，**该 Id 必须属于这个 token 的账号**，否则 401（避免拿 A 的 token 当 B 用）
+  - **保护范围**：`Users/{id}` / `Views` / `Items` / `Items/Latest` / `Items/{id}`（详情）/ `Shows/*/Seasons` / `Shows/*/Episodes` / `PlaybackInfo` / `Stream`×2 / `videos/*` / `Items/{id}/Download`，共 12 条。请求里带了 `UserId` 时，**该 Id 必须属于这个 token 的账号**，否则 401（避免拿 A 的 token 当 B 用）
   - **豁免**：握手 `System/Info/Public`、登录 `AuthenticateByName`、面板自用端点（账号管理、tmdb 测试）、以及 **501 通配**。**图片端点也必须豁免**：实测**图片请求的凭证携带并不统一** —— 同一批 8 条 `Items/{id}/Images/*` 里，5 条带 `x-emby-authorization`（Rex-Standard），**3 条什么凭证都不带**（原生 `Rex/13 CFNetwork` 客户端，头里只有 `accept`/`user-agent`）。要求 token 会让那部分客户端图全挂。（对照：**非图片请求 9/9 都带 `x-emby-token`**。）
   - **生命周期**：改密或删账号 → 该账号的所有 token 一并作废（客户端需重新登录）；`last_seen_at` 每次请求更新（60 秒节流，拉流时不会每个 Range 都写库）
   - **还没做**：官方登出端点 `POST /Sessions/Logout`（客户端"退出登录"目前打到 501 通配，token 不会被吊销）、`/Users/Public`（登录界面取用户列表）
@@ -428,6 +429,10 @@ docker logs -t media-bridge-panel              # 带时间戳
   - **条目级**（`service.baseItem`，列表项也受益）：`Etag` `SortName` `ForcedSortName` `PartCount`
     `Chapters` `TagItems` `LockData` `LockedFields` `CanDelete` `CanDownload` `LocalTrailerCount`
     `DisplayPreferencesId` `PresentationUniqueKey` `DateCreated` `DateModified`。
+    ⚠️ 其中 `CanDownload` 是 **`true`**（条目级）：握手的 `Policy.EnableContentDownloading` 一直是 `true`，
+    而 `Items/{ItemId}/Download` 也真做了 —— 这两处必须一致，否则客户端"照 policy 去试、又按条目不提供下载入口"
+    （实测 SenPlayer 就是照前者试了 8 次）。**库条目**（`CollectionFolder`）那条仍是 `false`：
+    文件夹下不了，真机也是 false。`CanDelete` 一律 `false`（删除确实没有）。
   - **条目级「线路派生」**（`getItem` 拿到线路后才补）：`Container` `Size` `Bitrate` `MediaStreams`
     `Path` `FileName`（`FileName` 用**源给的真文件名** `target.name`，不是版本副标题）。
   - **MediaSource 级**：`ItemId` `Chapters` `Formats` `RequiredHttpHeaders` `IsInfiniteStream`
@@ -544,6 +549,12 @@ docker logs -t media-bridge-panel              # 带时间戳
   - **Id 解析两种形状都认**（`parseCatpawSourceId()`）：新的 base64url，以及**旧版明文** `catpaw:<site>:<flag>|<vod>`（客户端可能还缓存着）。区分靠**有没有 `:`** —— base64url 的字符集是 `[A-Za-z0-9_-]` 不含 `:`，而明文形状里站点与线路之间必有；不必加标记位。但线路名带 `#` 的**旧明文** Id **救不回来**（`#` 之后的内容客户端根本没发出来），只能等它从新的 `PlaybackInfo` 重新取一次 Id。
   - **载荷改成 JSON**：原来拼的是 `<源>:<站点>:<线路>|<vod>`，但 **vod 里就可能有 `|`** —— 站源把 meta 塞进 `vod_id` 是常态，`vod_remarks` 里带竖线（实测 Lmentor 的 `nodejs_bili_all`：`{"…","vod_remarks":"5分18秒|2.6万|19天前"}`）。老写法按「最后一个 `|`」切 vod，于是拉流时 vod 被切成 `19天前"}}` → 聚合层查不到这条绑定 → **404**，客户端表现为"点了播放没反应"。现在整段编成 JSON `{s,t,f,v}` 再 base64url：字段边界靠结构，`|`/`:`/`#` 出现在任何字段里都不是问题；**老的两种形状仍然认**（客户端可能缓存着旧 Id），认哪种看解出来的内容（以 `{` 开头 = JSON）。
   - **拉流时现取、不缓存**：`detail`（快路径 site+vodId，拿**新鲜**的集 ID）→ `agg.play`。代价是首帧要等两次上游调用（实测各 ≈2.5s）；先不缓存，等测出真实首帧延迟再说。
+  - **下载（`Items/{ItemId}/Download`）走的是这一套，不是另写一套**：客户端的下载请求同样只带 `MediaSourceId`
+    （`?MediaSourceId=catpaw:<base64>&DeviceId=…`），要的东西与拉流逐项相同，所以那条路由就是
+    「`MediaSourceId` → `resolveStream` → `serveStream` 302」—— 与 `videos/*` 那段代码同构，不新增取数逻辑。
+    差别只在两处：日志那行写「下载」（`serveStream` 的 `verb` 参数），以及**语义**上：302 之后
+    `Content-Disposition`（文件名）/`Content-Type`/断点续传都由源站决定，面板改不了 ——
+    想给「片名.S01E01.mkv」那种名字就必须由面板转发**全量字节**，那是 ADR-0006 明确不要的。
   - **拉流方式 = 一律 302**（「面板代理」那条路与 `play.mode` 一并删掉）：
     面板只回一个 `Location`，视频字节全在客户端与源之间跑。
     为什么删代理：面板跑在路由器上（2G 内存、U 盘），把每条流的字节都接一遍是代价最高的一种做法；
@@ -899,7 +910,7 @@ TMDB 流量分**两类**，走的路完全不同 —— 混在一起算账一定
 | `server/modules/emby/index.js` | 模块清单：`upstream: 'agg'`、设置项（`serverName` / `imageKey` / 账号空壳）与校验（服务器名长度）。**`play.filter` 已搬到聚合层**（`agg.json` 的 `lineFilter`，UI 在「聚合设置 → 聚合参数」），那份校验也跟着走了；`play.mode`（随"面板代理"一起删）、`tmdb.*` 与 `cache.*` 都不在这里了；这里也不再需要"放行老值"的兼容校验 —— 校验里没有那个键，盘上留着也不挡保存 |
 | `server/modules/panel/index.js` | 面板层设置与钩子：`logMax`（改了就 `resize`）、`tmdb.*`、**`cache.*`**（`onSettingsChange` 里调 `cachedb.sweepAll()` 落实新上限） |
 | `public/modules/emby/setup.js`（「Emby → 连接设置」页） | **两张卡**：**服务器名** / **账号管理（多账号：列表 + 弹窗新增 + 改密 + 删除）**。（原来的「播放设置」卡整张撤掉：拉流一律 302 没有可选项、线路过滤搬到「聚合设置 → 聚合参数」。）**聚合地址不显示**（就是本面板自己，没得填）；TMDB 与缓存设置已搬到面板设置页 |
-| `public/modules/panel/settings.js`（「面板设置」页） | 备份还原 / **TMDB 设置** / **缓存设置**（用量 + 上限 + 清空，端点 `GET\|DELETE /api/panel/cache`）/ 面板密码 |
+| `public/modules/panel/settings.js`（「面板设置」页） | 版本与更新（**更新内容用弹窗展示**，含 GitHub 上那个 Release 的链接）/ 备份还原 / **TMDB 设置** / **缓存设置**（用量 + 上限 + 清空，端点 `GET\|DELETE /api/panel/cache`）/ 面板密码 / **关于**（名称、版本、仓库地址 —— 地址取自 `GET /api/panel/info`） |
 | `data/settings/emby.json` | `account`（**只剩空壳**，账号已搬到 sqlite）、`serverId`、`imageKey`（`tmdb.*` 与 `cache.*` 搬到 `panel.json`；`play.filter` 搬到 `agg.json` 的 `lineFilter`，盘上那两个老键既不读也不校验） |
 | `data/settings/panel.json` | 面板监听参数、`logMax`、`modules`、**`tmdb.{token,apiBase,imageBase,language}`**、**`cache.{tmdbTtlDays,tmdbMaxMB,imageTtlDays,imageMaxMB}`**（都在启动时从 `emby.json` 自动搬迁、数值不丢） |
 | `data/emby/emby.db` | 客户端登录账号表（内置 sqlite；密码为 scrypt 哈希）。**「配置备份/还原」不包含它**（`backup.js` 只打包 `settings/`）—— 还原备份后账号要重建 |

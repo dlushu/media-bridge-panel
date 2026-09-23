@@ -26,7 +26,7 @@ import { switchPage, renderPage } from '../../core/shell.js';
 const FOLD_AT = 12;
 
 export function renderAgg(v) {
-  const agg = (S.settings && S.settings.agg) || { enabled: [], timeoutMs: 12000, concurrency: 8 };
+  const agg = (S.settings && S.settings.agg) || { enabled: [], timeoutMs: 5000, concurrency: 8 };
 
   const wdInput = el('input', { type: 'text', placeholder: '搜索关键字，例如：斗破苍穹', value: S.aggKeyword, spellcheck: 'false' });
   wdInput.addEventListener('input', () => (S.aggKeyword = wdInput.value));

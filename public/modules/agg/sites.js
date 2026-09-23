@@ -23,7 +23,7 @@ export async function renderSites(v) {
       },
     }),
     (() => {
-      const inp = el('input', { type: 'text', placeholder: '过滤站点名/key', value: S.siteFilter });
+      const inp = el('input', { type: 'text', placeholder: '过滤站点名', value: S.siteFilter });
       inp.addEventListener('input', () => {
         S.siteFilter = inp.value;
         renderSiteTable();
@@ -145,8 +145,6 @@ function renderSiteTable() {
         el('th', { text: '排序' }),
         el('th', { text: '来源' }),
         el('th', { text: '名称' }),
-        el('th', { class: 'mono', text: 'key' }),
-        el('th', { class: 'mono', text: 'api' }),
         el('th', { title: '源自己申报的字段，仅供参考（常漏报：实测 TG搜 没写 searchable 但 /search 完全能用）。详见表格下的脚注', text: '能力' })
       )
     )
@@ -186,8 +184,6 @@ function renderSiteTable() {
         ),
         el('td', { class: 'note', text: s.sourceName || s.source }),
         el('td', { text: s.name || '-' }),
-        el('td', { class: 'mono', text: s.key || '-' }),
-        el('td', { class: 'mono', text: s.api || '-' }),
         el(
           'td',
           {},
