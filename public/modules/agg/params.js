@@ -101,18 +101,20 @@ export async function renderAggParams(v) {
 
   /* ---- 打分设置 ---- */
   const minScore = el('input', { type: 'number', class: 'w-md', value: String(num(agg.matchMinScore, 0.85)), min: '0', max: '1', step: '0.05' });
-  const maxItems = el('input', { type: 'number', class: 'w-md', value: String(num(agg.matchMaxItems, 3)), min: '1', max: '20' });
-  /* 接续补打：前 N 条没凑够 N 条能用的（空壳 / 定位不到这一集）时，按分数继续往下打，
-   * 最多再多试 K 条，**凑够 N 条就停**（想"一直打到底"就勾下面的开关）。 */
-  const extraK = el('input', { type: 'number', class: 'w-md', value: String(num(agg.matchExtraK, 8)), min: '0', max: '10' });
+  const maxItems = el('input', { type: 'number', class: 'w-md', value: String(num(agg.matchMaxItems, 8)), min: '1', max: '20' });
+  /* 接续补打：前 N 条**一条能用的都没拿到**（空壳 / 定位不到这一集）时，按分数继续往下打，
+   * 最多再试 K 条，**第一批拿到能用的就不再发第二批**（想"一直打到底"就勾下面的开关）。
+   * **默认 K = 0（不补打）**：实测它容易变成最贵的一段（一批按 N 条并发打 `/detail`），
+   * 而换来的可用条目常常是 0；想要兜底就把它填上。 */
+  const extraK = el('input', { type: 'number', class: 'w-md', value: String(num(agg.matchExtraK, 0)), min: '0', max: '10' });
   const extraAllCb = el('input', { type: 'checkbox', checked: agg.matchExtraAll === true });
   /* 「匹配到底」勾上时 K 就不生效了 —— 二者冲突，所以勾上时直接隐藏 K 那一格
    * （`title` 里也写了二者互斥）。 */
   const extraKLabel = el(
     'label',
-    { class: 'chk', title: '前 N 条没凑够时，按分数继续往下打，最多再试这么多条；凑够 N 条就停。填 0 = 不往下补打' },
+    { class: 'chk', title: '前 N 条一条能用的都没拿到时，按分数继续往下打，最多再试这么多条；第一批拿到能用的就不再往下打。填 0 = 不补打' },
     extraK,
-    '没凑够时再往下打几条'
+    '一条都没拿到时再往下打几条'
   );
   const syncExtra = () => extraKLabel.classList.toggle('hidden', extraAllCb.checked);
   extraAllCb.addEventListener('change', syncExtra);
@@ -124,7 +126,7 @@ export async function renderAggParams(v) {
     const ek = Number(extraK.value);
     if (!(ms >= 0 && ms <= 1)) return toast('分数线填 0~1（填 0 = 不过滤分数线）', true);
     if (!(mi >= 1 && mi <= 20)) return toast('最多留几条填 1~20', true);
-    if (!(ek >= 0 && ek <= 10)) return toast('「没凑够时再往下打几条」填 0~10（0 = 不补打）', true);
+    if (!(ek >= 0 && ek <= 10)) return toast('「一条都没拿到时再往下打几条」填 0~10（0 = 不补打）', true);
     save2.disabled = true;
     try {
       await saveAggSettings({ matchMinScore: ms, matchMaxItems: mi, matchExtraK: ek, matchExtraAll: extraAllCb.checked });
@@ -143,9 +145,9 @@ export async function renderAggParams(v) {
       'div',
       { class: 'row' },
       el('label', { class: 'chk', title: '打分 ≥ 它的才算命中。填 0 = 不过滤分数线（只按分数排名取前 N 条）' }, minScore, '分数线'),
-      el('label', { class: 'chk', title: '想要几条"能用的"（有线路、且定位到你要的那一集）。每多一条，后面就多打一次站源 /detail' }, maxItems, '最多留几条命中'),
+      el('label', { class: 'chk', title: '阶段一要取几条（有线路、且定位到你要的那一集）。每多取一条就多打一次站源 /detail' }, maxItems, '最多留几条命中'),
       extraKLabel,
-      el('label', { class: 'chk', title: '不看"再往下打几条"，一直往下打到凑够或名单打完（每个候选都要打一次站源 /detail，可能慢）' }, extraAllCb, '匹配到底'),
+      el('label', { class: 'chk', title: '不看"再往下打几条"，一直往下打到拿到一条能用的或名单打完（每个候选都要打一次站源 /detail，可能慢）' }, extraAllCb, '匹配到底'),
       save2
     ),
     el('div', {
@@ -156,7 +158,7 @@ export async function renderAggParams(v) {
     el('div', {
       class: 'note',
       text:
-        '"能用的"= 有线路、且定位到你要的那一集；前 N 条没凑够时按分数往下补打，最多试 N+K 条、凑够 N 条就停。',
+        '"能用的"= 有线路、且定位到你要的那一集；前 N 条一条能用的都没拿到时，才按分数往下补打（最多再试 K 条）。',
     }),
     el(
       'div',
@@ -256,13 +258,13 @@ export async function renderAggParams(v) {
     );
 
     out.push(
-      noteLine(`④ 凑够 ${N} 条：③ 里"能用"的不足 ${N} 条时，按分数往下补打`),
+      noteLine('④ 兜底补打：③ 里**一条能用的都没拿到**时才按分数往下补打（有版本就不打）'),
       noteLine(
         all
-          ? '勾了「匹配到底」：不看 K，一直往下打到凑够或名单打完 —— 没有上限（可能很慢）'
+          ? '勾了「匹配到底」：不看 K，一直往下打到拿到一条或名单打完 —— 没有上限（可能很慢）'
           : K === 0
-            ? '「再往下打几条」= 0：不补打 —— 前 N 条里能用几条就是几条'
-            : `最多再试 ${K} 条，每批 ${N} 条并发 → 最坏再加 ≈ ${extraRounds} × ${D}s = ${extraWorst}s`
+            ? '「再往下打几条」= 0：不补打（默认）—— 前面一条都没拿到就是没有'
+            : `最多再试 ${K} 条，每批 ${N} 条并发；第一批拿到就不再打 → 最坏再加 ≈ ${extraRounds} × ${D}s = ${extraWorst}s`
       )
     );
 
@@ -277,7 +279,7 @@ export async function renderAggParams(v) {
           ? `最坏总耗时 ≈ 搜索 ${searchWorst}s + 详情 ${D}s + 补打（无上限）`
           : `最坏总耗时 ≈ 搜索 ${searchWorst}s + 详情 ${D}s + 补打 ${extraWorst || 0}s ≈ ${searchWorst + D + (extraWorst || 0)}s`
       ),
-      noteLine('（正常几秒；体感主要由 ③ 决定 —— 命中的站里最慢的那一发）')
+      noteLine('（补打只在 ③ 一条都没拿到时才会发生；正常几秒，体感主要由 ③ 决定 —— 最慢的那一发）')
     );
     return out;
   };

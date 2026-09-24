@@ -211,7 +211,7 @@ function cacheableDetail(out) {
  * `timeoutMs`（搜索那一步的单站超时，毫秒）/ `detailTimeoutMs`（**取详情**的单站超时，毫秒，
  * 不传读 `agg.detailTimeoutSec` —— 默认比搜索宽，理由见 service.searchTimeoutMs）/
  * `minScore` + `maxItems`（打分阈值与"最多留几条"，不传就用 `agg.json` 里的设置）；
- * `extraK` / `extraAll`（接续补打：前 N 条没凑够时再往下试几条 / 匹配到底，不传读设置）。
+ * `extraK` / `extraAll`（接续补打：前面一条能用的都没拿到时再往下试几条 / 匹配到底，不传读设置）。
  * **没有 `all`**：命中的站一律全取（见 service.aggregateDetail），
  * 但条数受 `maxItems` 限制（每多一条命中就要多打一次 `/detail` 取链，太慢）。
  * ⚠️ **不再有 TMDB 反查**：判据是 `match.js` 的打分（理由见那个文件顶部）。
@@ -280,8 +280,8 @@ async function detail(opts = {}) {
       detailTimeoutMs: opts.detailTimeoutMs,
       minScore: opts.minScore,
       maxItems: opts.maxItems,
-      /* 接续补打（不传读设置）：前 N 条没凑够时最多再多试几条（`matchExtraK`）；
-       * `extraAll` = 匹配到底（不看 K，一直往下打到凑够或名单打完） */
+      /* 接续补打（不传读设置）：一条能用的都没拿到时最多再试几条（`matchExtraK`）；
+       * `extraAll` = 匹配到底（不看 K，一直往下打到拿到一条或名单打完） */
       extraK: opts.extraK,
       extraAll: opts.extraAll,
     });

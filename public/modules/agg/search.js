@@ -42,7 +42,7 @@ export function renderAgg(v) {
   });
 
   /* ---- 打分用的输入（默认值取「聚合设置」里那两个；页面上改只影响这一次请求）---- */
-  const defaults = { minScore: agg.matchMinScore === undefined ? 0.85 : agg.matchMinScore, maxItems: agg.matchMaxItems === undefined ? 3 : agg.matchMaxItems };
+  const defaults = { minScore: agg.matchMinScore === undefined ? 0.85 : agg.matchMinScore, maxItems: agg.matchMaxItems === undefined ? 8 : agg.matchMaxItems };
   /* 宽度档位见 style.css 的 `.chk > input.w-*`：季/集/年份只要小框（w-xs），
    * 分数与条数要能看全 `0.85` / `15` 这种值（w-md）—— 编辑框太小时数值显示不全。 */
   const numInput = (key, fallback, min, max, title, cls) => {

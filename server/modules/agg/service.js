@@ -38,9 +38,11 @@ function matchDefaults(opts) {
   const num = (v, d) => (v === undefined || v === null || v === '' ? d : Number(v));
   return {
     minScore: num(o.minScore, num(cfg.matchMinScore, 0.85)),
-    maxItems: num(o.maxItems, num(cfg.matchMaxItems, 3)),
+    maxItems: num(o.maxItems, num(cfg.matchMaxItems, 8)),
     unmatchedMax: num(o.unmatchedMax, 20),
-    extraK: num(o.extraK, num(cfg.matchExtraK, 3)),
+    /* K 的兜底是 0（与 `agg.json` 的默认一致）：取不到设置时**不补打**，
+     * 宁可少几条版本，也不要因为读不到配置而按 8 条去烧上游 */
+    extraK: num(o.extraK, num(cfg.matchExtraK, 0)),
   };
 }
 
@@ -341,7 +343,7 @@ function lineVisible(line, need, re) {
 }
 
 /**
- * **一条条目（一个 `vod_id`）取回来的详情能不能用** —— 这是"凑够 N 条"里那"一条"的判据：
+ * **一条条目（一个 `vod_id`）取回来的详情能不能用** —— 这是"有没有拿到一条能用的"里那"一条"的判据：
  *   · 必须有线路；
  *   · 剧集（`need === true`，即请求带了集号）：**至少要有一条线路定位到了这一集** ——
  *     只有线路、却定位不到这一集的那种，Emby 那边会因为"点了必然 404"把它过滤掉
@@ -778,7 +780,7 @@ async function fetchDetail(source, site, vodId, timeoutMs, season, episode, pick
  *
  * ⚠️ **已去掉 picked 挑选：命中即全取**（原为"默认只取 picked 那一站，省时间"）。
  * `picked` 字段仍然返回 —— 但它只是"分最高的那条"**代表值**，不再用来筛掉别的站。
- * `maxItems`（默认 3）是上限：命中越多，"取链"的上游请求就越多，太慢。
+ * `maxItems`（默认 8）是上限：命中越多，"取链"的上游请求就越多，太慢。
  */
 async function aggregateDetail(sources, sites, opts = {}) {
   const cfg = settings.read('agg');
@@ -802,7 +804,7 @@ async function aggregateDetail(sources, sites, opts = {}) {
    * 两者互斥地决定"什么算可播目标"，判据与理由见 `fetchDetail` 顶部。 */
   const pick = opts.pick === 'items' ? 'items' : '';
   /* 线路过滤规则：**参与"能用"的判据**（见 `detailUsable` 与 ADR-0025）——
-   * 否则会出现"命中 3 条、客户端 0 个版本"，而接续补打还以为已经凑够了。 */
+   * 否则会出现"命中 3 条、客户端 0 个版本"，而接续补打还以为已经有能用的了。 */
   const lf = lineFilter();
 
   /* ---- 快路径：已知绑定（source + site + vodId），跳过搜索 ---- */
@@ -885,8 +887,8 @@ async function aggregateDetail(sources, sites, opts = {}) {
     return ia - ib;
   });
   /* 接续补打要用的两本账（判据见下面那段说明）：
-   *   `attempted`  = 已经打过 `/detail` 的条目（`vod_id`）—— 补打时别再打一遍；
-   *   `usableItems`= 其中**能用**的条数（`detailUsable`）—— 目标是凑够 `maxItems` 条。
+   *   `attempted`  = 已经打过 `/detail` 的条目（`vod_id`）—— 补打时别再打一遍，也是"试了多少条"的账；
+   *   `usableItems`= 其中**能用**的条数（`detailUsable`）—— 它是不是 0，决定要不要补打。
    * `usableBefore` 是同一批条目**不看线路过滤**时的可用条数：只用于日志诊断
    *（"规则挡掉了几条"一眼可见）；补打与判据一律用 `usableItems`（过滤后）。 */
   const needTarget = episode !== null && episode !== undefined;
@@ -950,21 +952,29 @@ async function aggregateDetail(sources, sites, opts = {}) {
     })
   );
 
-  /* ---- 接续补打：**最多试 N+K 条，凑够 N 条就算完** ----
-   * 口径（**取代了上一版的"命中即止"**）：N = 最多留几条命中（`matchMaxItems`），
-   * 想要的是 **N 条能用的**；前 N 条没凑够就按分数继续往下打，**最多再多试 K 条**（`matchExtraK`），
-   * **凑够 N 条就立刻停**。勾了 **「匹配到底」**（`matchExtraAll`）= 不看 K，一直往下打到凑够或名单打完。
+  /* ---- 接续补打：**前面一条能用的都没拿到时，才往下补打** ----
+   * 口径（**取代了上一版的"没凑够 N 条就往下打"**，见 ADR-0027）：
+   * `maxItems`（N）只决定**阶段一取哪几条**；只有当阶段一**一条能用的都没拿到**
+   *（过滤后客户端的版本列表会是 0）时，才按分数继续往下打，**最多再试 K 条**（`matchExtraK`），
+   * **第一批拿到能用的就不再发第二批**。勾了 **「匹配到底」**（`matchExtraAll`）= 不看 K，
+   * 一直往下打到拿到一条或名单打完。
    *
-   * 为什么要它：命中 ≠ 能播 —— 实测（玩偶/虎斑/木偶）里前 N 条可能全是空壳、或定位不到这一集，
-   * 那样版本列表就少几条甚至为空；而真正有这一集的条目排在 N 名之外（被 `maxItems` 截掉了）。
-   * 代价：最坏多打 K 次站源 `/detail`（顺序打、凑够即止，所以前 N 条都够用时是 0 次）。
+   * 为什么要它：命中 ≠ 能播 —— 前 N 条可能全是空壳、或定位不到这一集，那样客户端的版本列表
+   * 直接是空的；而真正有这一集的条目排在 N 名之外（被 `maxItems` 截掉了）。但**前面已经有版本时
+   * 不值得再往下打**：多打的那几条换来的只是"更多版本"，而每一条都是 10 秒级的站源 `/detail`。
+   *
+   * 怎么打：**整批并发**（批宽 = 阶段一的条数 `N`），一批的墙钟耗时 ≈ 其中**最慢的那条**，
+   * 而不是逐条相加 —— 代价是"批内已经发出去的都得等"（一批里只有一条是必要的）。
    */
   const cfgNow = settings.read('agg');
   const extraAll = !!(opts.extraAll === undefined ? cfgNow.matchExtraAll : opts.extraAll);
   const extraK = Math.max(0, Number(opts.extraK === undefined ? cfgNow.matchExtraK : opts.extraK) || 0);
-  /* 目标 = "凑够 `maxItems` 条能用的"；最多试 `maxItems + K` 条（匹配到底则不限条数） */
+  /* `targetN` 仍然只表示"阶段一要取几条"（批宽按它算）；补打的判据是"一条能用的都没有" */
   const targetN = Math.max(1, Number((search.match || {}).maxItems) || 1);
-  const attemptCap = extraAll ? Infinity : targetN + extraK;
+  /* 上限 = **阶段一实际打了几条 + K**（"最多再试 K 条"的字面口径）——
+   * 阶段一因为命中不足而少打时，省下的额度**不转给**补打（原先按 `N + K` 算会有这个副作用）。 */
+  const stage1Tried = attempted.size;
+  const attemptCap = extraAll ? Infinity : stage1Tried + extraK;
   out.stats.targetN = targetN;
   out.stats.matchUsable = usableItems;
   out.stats.usableBeforeFilter = usableBefore;
@@ -975,14 +985,16 @@ async function aggregateDetail(sources, sites, opts = {}) {
         `过滤前能用 ${usableBefore} 条 → 过滤后能用 ${usableItems} 条`
     );
   }
-  if (usableItems < targetN && (extraAll || extraK > 0)) {
+  /* **只有一条能用的都没有**才补打：前面已经有版本时，多打几条只换来"更多版本"，
+   * 不值那几发 10 秒级的站源请求（触发判据的这一版见 ADR-0027）。 */
+  if (usableItems === 0 && (extraAll || extraK > 0)) {
     const rest = (search.ranked || []).filter((x) => !attempted.has(String(x.vod_id || '')));
     let extraN = 0;
     let extraUsable = 0;
-    /* **并发度 = 「最多留几条命中」（`targetN`）** —— 一批打这么多，正好是目标条数。
-     * 取舍：并发打就叫不出"凑够就立刻停"那种极限（串行时第 3 条一到就收手），这一批里多打的
-     * 那几条是白打的（多烧上游）；换来的是耗时从"逐条相加"变成"每批取最慢的那条"——
-     * 补打原本最坏是 (maxItems + extraK) 条串行 × 超时，那是最贵的一段。 */
+    /* **批宽 = 「最多留几条命中」（`targetN`）**：一批就发这么多，并发打。
+     * 取舍：一批发出去之后，"拿到就不再打"只能**在批与批之间**生效 ——
+     * 批内多打的（最多 `width - 1` 条）是白烧的；换来的是耗时从"逐条相加"变成
+     * "每批取最慢的那条"（串行时最坏是 K 条 × 取详情超时，那是最贵的一段）。 */
     const width = Math.max(1, targetN);
 
     /** 一条候选的结果落账（与串行版逐条做的事完全一样，只是挪到批量之后按名次顺序跑） */
@@ -1022,8 +1034,9 @@ async function aggregateDetail(sources, sites, opts = {}) {
 
     let from = 0;
     for (;;) {
-      /* 试过的条数封顶：`attempted` 里既有阶段一打过的、也有本阶段打过的 */
-      if (attempted.size >= attemptCap || usableItems >= targetN) break;
+      /* 封顶：试过的条数到 `attemptCap` 就收手；**拿到能用的就不发下一批**。
+       * `attempted` 里既有阶段一打过的、也有本阶段打过的。 */
+      if (attempted.size >= attemptCap || usableItems >= 1) break;
       const room = Math.max(1, Math.min(width, attemptCap - attempted.size));
       const batch = [];
       while (from < rest.length && batch.length < room) {
@@ -1044,20 +1057,16 @@ async function aggregateDetail(sources, sites, opts = {}) {
           return { cand, r2 };
         })
       );
-      /* 按**名次**顺序落账（`Promise.all` 保序）：谁先回来不影响"代表取分最高那条" */
-      for (const { cand, r2 } of got) {
-        settle(cand, r2);
-        if (usableItems >= targetN) break; // 这一批里凑够了，剩下的（同批已打完的）就算了
-      }
+      /* 按**名次**顺序落账（`Promise.all` 保序）：谁先回来不影响"代表取分最高那条"。
+       * 这一批的**全部**结果都落账 —— 请求已经发出去了，不列出来等于白烧；
+       * "拿到就收手"只作用在**要不要发下一批**上（见循环开头那个 break）。 */
+      for (const { cand, r2 } of got) settle(cand, r2);
     }
     out.stats.extraHit = extraUsable;
     console.log(
-      `  ${extraUsable ? '↻' : '·'} agg 接续补打：前 ${(search.matched || []).length} 条里能用` +
-        ` ${out.stats.matchUsable}/${targetN} 条 → 往下打了 ${extraN} 条` +
-        `${extraAll ? '（匹配到底）' : `（上限 ${extraK}）`}，` +
-        (usableItems >= targetN
-          ? `凑够 ${usableItems}/${targetN} 条（阶段一 ${out.stats.matchUsable} + 补打 ${extraUsable}）`
-          : `共有 ${usableItems}/${targetN} 条能用，仍未凑够（如实为空）`)
+      `  ${extraUsable ? '↻' : '·'} agg 接续补打：阶段一 ${(search.matched || []).length} 条里能用 0 条 →` +
+        ` 往下打了 ${extraN} 条${extraAll ? '（匹配到底）' : `（上限 ${extraK} 条）`}，` +
+        (extraUsable ? `拿到 ${extraUsable} 条能用的` : '仍是一条都没拿到（如实为空）')
     );
   }
 

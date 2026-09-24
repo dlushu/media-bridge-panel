@@ -1,7 +1,8 @@
 # ADR-0005 接续补打：最多试 N+K 条，凑够 N 条即止
 
-- 状态：已采纳
-- 相关：[agg/service.js](../../server/modules/agg/service.js) · [0003](0003-local-title-scoring.md) · [0004](0004-no-same-site-dedup.md)
+- 状态：已采纳（**触发条件、停止条件与上限口径已被 [0027](0027-extra-fetch-only-when-zero.md) 取代**，
+  其余部分继续有效）
+- 相关：[agg/service.js](../../server/modules/agg/service.js) · [0003](0003-local-title-scoring.md) · [0004](0004-no-same-site-dedup.md) · [0027](0027-extra-fetch-only-when-zero.md)
 
 ## 背景
 

@@ -22,14 +22,15 @@
  *                    小时数取值 1~168
  *   lineFilter       **Emby 版本列表的线路过滤**（正则，只匹配线路名）：由 emby 层迁入
  *                    （线路就是聚合层产出的东西，过滤规则随它放在一处）
- *   matchExtraK      **接续补打**（"凑够 N 条"口径）：
- *                    前 `matchMaxItems` 条取详情后**没凑够 N 条能用的**（空壳 / 定位不到这一集）时，
- *                    按分数继续往下打，**最多再试 K 条，凑够 N 条就停**；0 = 不往下补打
- *   matchExtraAll    **匹配到底**（开关）：不看 `matchExtraK`，一直往下打到凑够 N 条
+ *   matchExtraK      **接续补打**（"零版本才兜底"口径，见 ADR-0027）：
+ *                    前 `matchMaxItems` 条取详情后**一条能用的都没拿到**（空壳 / 定位不到这一集）时，
+ *                    按分数继续往下打，**最多再试 K 条，第一批拿到能用的就不再发第二批**；
+ *                    0 = 不往下补打（默认值）
+ *   matchExtraAll    **匹配到底**（开关）：不看 `matchExtraK`，一直往下打到拿到一条能用的
  *                    或名单打完（可能很慢 —— 每个候选都要打一次站源 `/detail`）
  *   matchMinScore / matchMaxItems  **打分匹配**：见 `match.js` 顶部
  *                       `matchMinScore` = 分数线，**填 0 = 不按分数线筛选**（只按分数排名取前 N 条）
- *                       `matchMaxItems` = 最多留几条命中（= 想要的"能用的"条数 N）；每多留一条就多打一次站源 `/detail`
+ *                       `matchMaxItems` = **阶段一**最多取几条命中；每多取一条就多打一次站源 `/detail`
  */
 module.exports = {
   defaults: () => ({
@@ -42,8 +43,8 @@ module.exports = {
     speedTestAuto: true,
     speedTestHours: 6,
     matchMinScore: 0.85,
-    matchMaxItems: 3,
-    matchExtraK: 8,
+    matchMaxItems: 8,
+    matchExtraK: 0,
     matchExtraAll: false,
     lineFilter: '',
   }),
@@ -57,8 +58,8 @@ module.exports = {
     { key: 'speedTestHours', label: '测速间隔(小时)', type: 'number', min: 1, max: 168 },
     { key: 'matchMinScore', label: '打分分数线(0~1，0=不筛选)', type: 'number', min: 0, max: 1, step: 0.05 },
     { key: 'matchMaxItems', label: '最多留几条命中', type: 'number', min: 1, max: 20 },
-    { key: 'matchExtraK', label: '没凑够时再往下打几条', type: 'number', min: 0, max: 10 },
-    { key: 'matchExtraAll', label: '匹配到底(不看 K，直到凑够)', type: 'bool' },
+    { key: 'matchExtraK', label: '一条都没拿到时再往下打几条', type: 'number', min: 0, max: 10 },
+    { key: 'matchExtraAll', label: '匹配到底(不看 K，直到拿到一条)', type: 'bool' },
     { key: 'lineFilter', label: '线路过滤(正则，匹配线路名)', type: 'text', placeholder: '留空 = 不过滤。例：夸克' },
   ],
 
